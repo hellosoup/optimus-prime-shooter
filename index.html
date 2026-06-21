@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Optimus Prime: Cybertron Survivor</title>
+    <style>
+      :root { color-scheme: dark; }
+      html, body { margin: 0; height: 100%; background: #05080f; overflow: hidden; }
+      #app { position: fixed; inset: 0; }
+      canvas { display: block; }
+      #overlay {
+        position: fixed; left: 12px; top: 12px;
+        font: 13px/1.5 ui-monospace, monospace;
+        color: #7fe9ff; text-shadow: 0 0 6px rgba(0,200,255,.6);
+        white-space: pre; z-index: 10;
+        max-height: 92vh; overflow-y: auto;
+        background: rgba(5,8,15,.55); padding: 8px 10px; border-radius: 6px;
+        backdrop-filter: blur(2px);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="overlay">loading...</div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
