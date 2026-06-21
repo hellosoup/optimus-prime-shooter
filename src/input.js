@@ -10,6 +10,7 @@ window.addEventListener('keydown', (e) => {
 window.addEventListener('keyup', (e) => held.delete(e.code));
 window.addEventListener('contextmenu', (e) => e.preventDefault());
 window.addEventListener('mousedown', (e) => {
+  if (e.button === 0) pressed.add('MouseLeft');
   if (e.button === 2) pressed.add('MouseRight');
 });
 // drop state if the window loses focus so keys don't "stick"

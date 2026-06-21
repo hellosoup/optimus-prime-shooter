@@ -10,6 +10,27 @@ import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { input } from './input.js';
 import { Player, MODE } from './player.js';
+import { loadSfx, playCombatSfx } from './sfx.js';
+import { setMusicPaused, startMusicPlaylist, toggleMusicMute } from './music.js';
+import { EnemyManager } from './enemies.js';
+import { BeachBallManager } from './beachBalls.js';
+import { DominoManager } from './dominoes.js';
+import { LegoPyramidManager } from './legoPyramid.js';
+import { HealthPackManager } from './healthPacks.js';
+import { RubiksCubeManager } from './rubiksCube.js';
+import { initHud, updateHud, showGameOver, hideGameOver, showPause, hidePause } from './hud.js';
+
+loadSfx('/sfx/Tf_sound.ogg');
+
+// Browser autoplay policy blocks audio until a user gesture, so kick off the
+// auto-cycling music playlist (track 3 -> 1 -> 2, repeating) on first input.
+const startMusicOnce = () => {
+  startMusicPlaylist();
+  window.removeEventListener('pointerdown', startMusicOnce);
+  window.removeEventListener('keydown', startMusicOnce);
+};
+window.addEventListener('pointerdown', startMusicOnce);
+window.addEventListener('keydown', startMusicOnce);
 
 // glTF clip names arrive as "OptimusPrime_G1|idle02|Base Layer"; shorten them.
 const shortClip = (name) => {
@@ -49,6 +70,10 @@ const CAM_OFFSET = new THREE.Vector3(40, 40, 40);
 const CAM_SMOOTH = 6;            // camera follow damping (higher = tighter)
 const camFocus = new THREE.Vector3(0, 0, 0); // smoothed ground point the camera tracks
 const CAM_LOOK = new THREE.Vector3(0, 4, 0);
+const shakeOffset = new THREE.Vector3();
+let shakeTime = 0;
+let shakeDuration = 0;
+let shakeStrength = 0;
 camera.position.copy(CAM_OFFSET);
 camera.lookAt(CAM_LOOK);
 
@@ -121,8 +146,10 @@ scene.add(sun);
 scene.add(sun.target);
 
 // ---- ground (placeholder Cybertron plate) ----
+const FLOOR_SIZE = 1000;
+const FLOOR_HALF = FLOOR_SIZE / 2;
 const ground = new THREE.Mesh(
-  new THREE.PlaneGeometry(1000, 1000),
+  new THREE.PlaneGeometry(FLOOR_SIZE, FLOOR_SIZE),
   new THREE.MeshStandardMaterial({ color: 0x111722, metalness: 0.35, roughness: 0.85 })
 );
 ground.rotation.x = -Math.PI / 2;
@@ -132,7 +159,7 @@ scene.add(ground);
 // Transparent real-shadow receiver makes Optimus's cast shadow readable on the
 // dark Cybertron floor without faking a blob under him.
 const shadowCatcher = new THREE.Mesh(
-  new THREE.PlaneGeometry(1000, 1000),
+  new THREE.PlaneGeometry(FLOOR_SIZE, FLOOR_SIZE),
   new THREE.ShadowMaterial({ color: 0x000000, opacity: 0.55 })
 );
 shadowCatcher.rotation.x = -Math.PI / 2;
@@ -141,23 +168,103 @@ shadowCatcher.receiveShadow = true;
 scene.add(shadowCatcher);
 
 // Glowing energon grid. Bright cyan so it crosses the bloom threshold.
-const grid = new THREE.GridHelper(1000, 100, 0x9fffff, 0x2f8394);
+const grid = new THREE.GridHelper(FLOOR_SIZE, 100, 0x9fffff, 0x2f8394);
 grid.material.transparent = true;
 grid.material.opacity = 0.72;
 grid.position.y = 0.025;
 scene.add(grid);
 
-// ---- HUD ----
-function setHud(player) {
-  const mode = !player ? 'loading...' : player.transforming ? 'TRANSFORMING'
-    : player.mode === MODE.VEHICLE ? `VEHICLE  (boost: ${player.boostCooldown > 0 ? 'cooling' : 'ready'})` : 'ROBOT  (combat)';
-  overlay.innerHTML =
-    `<div style="font-weight:bold;letter-spacing:1px">OPTIMUS PRIME</div>` +
-    `<div style="opacity:.8">mode: <b>${mode}</b></div>` +
-    `<div style="opacity:.55;margin-top:6px">WASD / arrows: move\nSPACE: transform\nRIGHT CLICK: truck boost</div>`;
-  overlay.style.whiteSpace = 'pre';
+// ---- arena walls (clamp the play area to the visible floor) ----
+const ARENA_HALF = FLOOR_HALF;
+{
+  const wallH = 10, wallT = 2;
+  const wallOffset = FLOOR_HALF + wallT / 2;
+  const span = FLOOR_SIZE + wallT * 2;
+  const wallMat = new THREE.MeshStandardMaterial({
+    color: 0x0a1a26, emissive: 0x1f7fa0, emissiveIntensity: 0.8, metalness: 0.7, roughness: 0.4,
+  });
+  const sides = [
+    { x: 0, z: wallOffset, w: span, d: wallT },
+    { x: 0, z: -wallOffset, w: span, d: wallT },
+    { x: wallOffset, z: 0, w: wallT, d: span },
+    { x: -wallOffset, z: 0, w: wallT, d: span },
+  ];
+  for (const s of sides) {
+    const wall = new THREE.Mesh(new THREE.BoxGeometry(s.w, wallH, s.d), wallMat);
+    wall.position.set(s.x, wallH / 2, s.z);
+    wall.castShadow = true; wall.receiveShadow = true;
+    scene.add(wall);
+  }
 }
-setHud(null);
+
+// ---- enemies / pickups / waves ----
+const enemyManager = new EnemyManager(scene, ARENA_HALF);
+const healthPackManager = new HealthPackManager(scene);
+enemyManager.onKill = ({ reason, position }) => {
+  playCombatSfx('enemyDeath');
+  if (reason === 'ram') {
+    addCameraShake(0.9, 0.16);
+  } else if (reason === 'ball') {
+    addCameraShake(0.55, 0.12);
+  }
+  healthPackManager.maybeDrop(position);
+};
+
+const beachBallManager = new BeachBallManager(scene, ARENA_HALF);
+const dominoManager = new DominoManager(scene);
+const legoPyramidManager = new LegoPyramidManager(scene, ARENA_HALF);
+const rubiksCubeManager = new RubiksCubeManager(scene);
+
+// ---- game state ----
+const MAX_HP = 100;
+const IFRAME_TIME = 0.9;       // invulnerability window after taking a hit
+const DEATH_FLASH_TIME = 0.55;
+const GAME_OVER_DELAY = 1.25;
+let health = MAX_HP;
+let iframe = 0;
+let hitFlash = 0;              // red screen-edge flash, decays each frame
+let deathTimer = 0;
+let deathExploded = false;
+let gameState = 'loading';    // 'loading' | 'playing' | 'paused' | 'dying' | 'gameover'
+
+function addCameraShake(strength, duration) {
+  shakeStrength = Math.max(shakeStrength, strength);
+  shakeDuration = Math.max(shakeDuration, duration);
+  shakeTime = Math.max(shakeTime, duration);
+}
+
+function damagePlayer(amount, sourcePosition = null) {
+  if (gameState !== 'playing' || iframe > 0) return;
+  health = Math.max(0, health - amount);
+  iframe = IFRAME_TIME;
+  hitFlash = 1;
+  if (player) {
+    player.flashDamage();
+    if (sourcePosition) player.applyKnockback(sourcePosition, 50);
+  }
+  addCameraShake(0.75, 0.18);
+  playCombatSfx('damage');
+  if (health <= 0) {
+    gameState = 'dying';
+    deathTimer = 0;
+    deathExploded = false;
+    addCameraShake(1.0, 0.24);
+  }
+}
+
+function restart() {
+  health = MAX_HP; iframe = 0; hitFlash = 0; deathTimer = 0; deathExploded = false;
+  player.reset();
+  enemyManager.reset();
+  healthPackManager.reset();
+  beachBallManager.reset();
+  dominoManager.reset();
+  legoPyramidManager.reset();
+  hideGameOver();
+  hidePause();
+  setMusicPaused(false);
+  gameState = 'playing';
+}
 
 // ---- load Optimus, then build the player ----
 let player = null;
@@ -230,9 +337,26 @@ loader.load(
 
     const mixer = new THREE.AnimationMixer(obj);
     player = new Player({ object: obj, mixer, clips: gltf.animations || [], shortClip, scene });
+    // Attacks destroy enemies in range when the hit window opens.
+    player.onHit = (type) => {
+      const ballHits = beachBallManager.handleAttack(type, player.object.position, player.heading);
+      const dominoHits = dominoManager.handleAttack(type, player.object.position, player.heading);
+      const legoHits = legoPyramidManager.handleAttack(type, player.object.position, player.heading);
+      const killed = enemyManager.handleAttack(type, player.object.position, player.heading);
+      if (killed > 0 || ballHits > 0 || dominoHits > 0 || legoHits > 0) {
+        addCameraShake(type === 'smash' ? 1.05 : 0.45, type === 'smash' ? 0.22 : 0.1);
+        playCombatSfx(type === 'smash' ? 'smash' : 'hit');
+      } else {
+        playCombatSfx('whiff');
+      }
+    };
     window.__player = player; window.__scene = scene;
+
+    initHud();
+    enemyManager.reset(); // queue wave 1
+    gameState = 'playing';
   },
-  (e) => { setHud(null); overlay.textContent = `loading... ${((e.loaded / (e.total || 1)) * 100).toFixed(0)}%`; },
+  (e) => { overlay.textContent = `loading... ${((e.loaded / (e.total || 1)) * 100).toFixed(0)}%`; },
   (err) => { overlay.textContent = 'GLB load error (see console)'; console.error(err); }
 );
 
@@ -256,17 +380,100 @@ function animate() {
   requestAnimationFrame(animate);
   const dt = Math.min(clock.getDelta(), 0.05); // clamp to avoid huge steps after a stall
 
+  if (input.wasPressed('KeyM')) toggleMusicMute();
+
   if (player) {
-    if (input.wasPressed('Space')) player.toggleTransform();
-    if (input.wasPressed('MouseRight')) player.tryBoost();
-    player.update(dt, input.moveAxis());
+    if (gameState === 'playing') {
+      if (input.wasPressed('Escape')) {
+        gameState = 'paused';
+        showPause();
+        setMusicPaused(true);
+        player.silenceMovementSfx();
+        input.endFrame();
+        composer.render();
+        return;
+      }
+
+      iframe = Math.max(0, iframe - dt);
+      hitFlash = Math.max(0, hitFlash - dt * 3);
+
+      if (input.wasPressed('Space')) player.toggleTransform();
+      if (input.wasPressed('MouseLeft')) {
+        if (player.mode === MODE.VEHICLE) player.tryBoost();
+        else player.attack('attack01');
+      }
+      player.update(dt, input.moveAxis());
+
+      // keep Optimus inside the walled arena
+      const lim = ARENA_HALF - 3;
+      player.object.position.x = Math.max(-lim, Math.min(lim, player.object.position.x));
+      player.object.position.z = Math.max(-lim, Math.min(lim, player.object.position.z));
+
+      beachBallManager.update(dt, player, enemyManager);
+      dominoManager.update(dt, player, beachBallManager.getImpactors());
+      legoPyramidManager.update(dt, player, beachBallManager.getImpactors());
+      enemyManager.update(dt, player, damagePlayer, [
+        ...beachBallManager.getObstacles(),
+        ...dominoManager.getObstacles(),
+        ...legoPyramidManager.getObstacles(),
+        ...rubiksCubeManager.getObstacles(),
+      ]);
+      healthPackManager.update(dt, player, (amount) => {
+        if (health >= MAX_HP) return false;
+        health = Math.min(MAX_HP, health + amount);
+        return true;
+      });
+    } else if (gameState === 'paused') {
+      if (input.wasPressed('Escape')) {
+        hidePause();
+        setMusicPaused(false);
+        gameState = 'playing';
+      } else if (input.wasPressed('Enter') || input.wasPressed('NumpadEnter')) {
+        restart();
+      } else {
+        player.silenceMovementSfx();
+      }
+    } else if (gameState === 'dying') {
+      hitFlash = Math.max(0, hitFlash - dt * 3);
+      deathTimer += dt;
+      player.stepDeathFx(dt);
+      if (!deathExploded && deathTimer >= DEATH_FLASH_TIME) {
+        deathExploded = true;
+        player.explode();
+        hitFlash = 1;
+        addCameraShake(1.8, 0.36);
+        playCombatSfx('smash');
+      }
+      if (deathTimer >= DEATH_FLASH_TIME + GAME_OVER_DELAY) {
+        gameState = 'gameover';
+        showGameOver({ wave: enemyManager.wave, kills: enemyManager.kills });
+      }
+    } else if (gameState === 'gameover') {
+      player.stepDeathFx(dt); // keep debris/smoke moving under the panel
+      if (input.wasPressed('Enter') || input.wasPressed('NumpadEnter')) restart();
+    }
 
     // camera eases toward the player (damped follow) instead of locking rigidly
     const p = player.object.position;
     const k = 1 - Math.exp(-CAM_SMOOTH * dt);
     camFocus.x += (p.x - camFocus.x) * k;
     camFocus.z += (p.z - camFocus.z) * k;
-    camera.position.set(camFocus.x + CAM_OFFSET.x, CAM_OFFSET.y, camFocus.z + CAM_OFFSET.z);
+    shakeOffset.set(0, 0, 0);
+    if (shakeTime > 0) {
+      shakeTime = Math.max(0, shakeTime - dt);
+      const falloff = shakeDuration > 0 ? shakeTime / shakeDuration : 0;
+      const amp = shakeStrength * falloff * falloff;
+      shakeOffset.set(
+        (Math.random() - 0.5) * amp,
+        (Math.random() - 0.5) * amp * 0.45,
+        (Math.random() - 0.5) * amp
+      );
+      if (shakeTime <= 0) {
+        shakeDuration = 0;
+        shakeStrength = 0;
+      }
+    }
+    camera.position.set(camFocus.x + CAM_OFFSET.x, CAM_OFFSET.y, camFocus.z + CAM_OFFSET.z).add(shakeOffset);
     CAM_LOOK.set(camFocus.x, 4, camFocus.z);
     camera.lookAt(CAM_LOOK);
 
@@ -290,7 +497,13 @@ function animate() {
     motionBlur.uniforms.damp.value += (targetAfterimage - motionBlur.uniforms.damp.value) * (1 - Math.exp(-10 * dt));
     boostBlur.uniforms.strength.value += (targetDirectionalBlur - boostBlur.uniforms.strength.value) * (1 - Math.exp(-14 * dt));
 
-    setHud(player);
+    updateHud({
+      health, maxHealth: MAX_HP,
+      mode: player.mode, transforming: player.transforming,
+      boosting: player.boosting, boostReady: player.boostReady, boostCooldownRatio: player.boostCooldownRatio,
+      wave: enemyManager.wave, kills: enemyManager.kills, enemies: enemyManager.alive,
+      waveBreak: enemyManager.waveBreak, hitFlash,
+    });
   }
 
   input.endFrame();

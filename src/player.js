@@ -1,6 +1,13 @@
 import * as THREE from 'three';
+import { playMovementSfx, playSegment, updateMovementSfx } from './sfx.js';
 
 export const MODE = { ROBOT: 'robot', VEHICLE: 'vehicle' };
+
+// Transform SFX segments within Tf_sound.ogg (2.506s clip): robot->truck plays
+// the first second (short fade so the 1.0s cut doesn't click); truck->robot
+// plays from 1.5s to the natural end of the clip.
+const SFX_TO_VEHICLE = { start: 0, end: 1.0, fadeOut: 0.07 };
+const SFX_TO_ROBOT = { start: 1.5, end: null };
 
 // --- tunables -------------------------------------------------------------
 // If Optimus faces the wrong way relative to movement, adjust MODEL_YAW_OFFSET
@@ -23,13 +30,30 @@ const ROBOT_TURN_RATE = 14;     // how fast facing catches up (higher = snappier
 const VEHICLE_TURN_RATE = 3.2;  // truck steering/heading, lower = wider turning circle
 const VEHICLE_NOSE_PIVOT_OFFSET = 2.4; // truck turns around a point near the nose
 const STOP_SPEED = 0.05;         // snap tiny eased velocity to a true stop
+const KNOCKBACK_DRAG = 9.5;
 const DUST_STEP_DISTANCE = 2.2;   // distance between robot dust footstep bursts
+const FOOTSTEP_SFX_DISTANCE = 8;
 const SMOKE_RATE = 40;           // particles per second at truck top speed, per stack
 const BOOST_DURATION = 0.9;
 const BOOST_COOLDOWN = 2.4;
 const BOOST_SPEED_MULT = 1.85;
 const BOOST_TURN_MULT = 0.22;
-const BOOST_FIRE_RATE = 95;
+const BOOST_FIRE_RATE = 145;
+const SKID_MARK_COUNT = 90;
+const SKID_MARK_DISTANCE = 2.4;
+const SKID_MARK_LIFETIME = 5.2;
+const DAMAGE_FLASH_DURATION = 0.45;
+const DEATH_GIBLET_COUNT = 34;
+
+// --- attacks --------------------------------------------------------------
+// Robot-mode melee. Each entry maps an input to a one-shot clip; `weapon` is
+// shown for the swing then hidden when it ends. Frame windows are authored at
+// ATTACK_ANIM_FPS so animation trims can be tuned in frame numbers.
+const ATTACK_ANIM_FPS = 30;
+const ATTACKS = {
+  attack01: { clip: 'attack01', weapon: null, startFrame: 15, hitFrame: 20, endFrame: 30, fade: 0.08 },
+  smash:    { clip: 'smash',    weapon: 'axe', hit: 0.5,  fade: 0.08 },
+};
 
 // shortest signed angle from a to b
 function angleLerp(a, b, t) {
@@ -37,6 +61,18 @@ function angleLerp(a, b, t) {
   if (d > Math.PI) d -= Math.PI * 2;
   if (d < -Math.PI) d += Math.PI * 2;
   return a + d * t;
+}
+
+function sampleColorStops(stops, t, out) {
+  if (!stops || stops.length === 0) return out;
+  for (let i = 0; i < stops.length - 1; i += 1) {
+    const a = stops[i];
+    const b = stops[i + 1];
+    if (t > b.at) continue;
+    const localT = Math.max(0, Math.min(1, (t - a.at) / (b.at - a.at || 1)));
+    return out.copy(a.color).lerp(b.color, localT);
+  }
+  return out.copy(stops[stops.length - 1].color);
 }
 
 function makeTrail(count, color, baseSize, opacity = 1, depthTest = true) {
@@ -129,6 +165,8 @@ function makeTrail(count, color, baseSize, opacity = 1, depthTest = true) {
     baseSizes: new Float32Array(count),
     growths: new Float32Array(count),
     angularSpeeds: new Float32Array(count),
+    colorStops: null,
+    _colorTmp: new THREE.Color(),
     cursor: 0,
     count,
   };
@@ -151,6 +189,57 @@ export class Player {
     this.transforming = false;
     this.transformTimer = 0;
     this.onTransformDone = null;
+
+    // attack state (robot-mode melee); locks locomotion until the swing ends
+    this.attacking = false;
+    this.attackCfg = null;
+    this.attackName = null;
+    this.attackElapsed = 0;
+    this.attackDuration = 0;
+    this.attackHitTime = 0;
+    this.hitFired = false;
+    this.onHit = null; // (attackName, cfg) => {}  -- wired to enemies later
+    this.damageFlashTimer = 0;
+    this.damageFlashMaterials = [];
+    this.object.traverse((c) => {
+      if (!c.isMesh || !c.material) return;
+      const mats = Array.isArray(c.material) ? c.material : [c.material];
+      for (const mat of mats) {
+        if (!mat || this.damageFlashMaterials.some((entry) => entry.mat === mat)) continue;
+        this.damageFlashMaterials.push({
+          mat,
+          color: mat.color ? mat.color.clone() : null,
+          emissive: mat.emissive ? mat.emissive.clone() : null,
+          emissiveIntensity: mat.emissiveIntensity ?? 0,
+        });
+      }
+    });
+
+    // axe mesh(es) shown only during the smash; hidden at load by main.js.
+    // The glTF export flattened the axe->bone parenting, so the mesh is stuck at
+    // the rig origin (on the floor) instead of in the hand. Re-attach it to
+    // Bone_axe, which rides the right hand in every clip, so it sits in-hand and
+    // follows the swing.
+    //
+    // Sizing is the tricky part: the model is tiny in the GLB and gets its size
+    // from a ~290x scale on the rig root, but Bone_axe's world scale is small AND
+    // animated by the clips. So a fixed local scale would be wrong and would
+    // pulse during the swing. Instead we record the root's world scale as the
+    // target and counter the bone's live world scale every visible frame
+    // (_syncAxeScale) to hold the axe at the body's on-screen size.
+    this.axeMeshes = [];
+    this.object.traverse((c) => { if (c.isMesh && /axe/i.test(c.name)) this.axeMeshes.push(c); });
+    this.axeBone = this.object.getObjectByName('Bone_axe');
+    this._axeWorldScaleTarget = this.object.getWorldScale(new THREE.Vector3()).x;
+    this._tmpScale = new THREE.Vector3();
+    if (this.axeBone) {
+      for (const m of this.axeMeshes) {
+        this.axeBone.add(m);       // ride the right hand
+        m.position.set(0, 0, 0);   // Bone_axe origin = the grip point
+        m.quaternion.set(0, 0, 0, 1);
+        m.visible = false;
+      }
+    }
     this.boostTimer = 0;
     this.boostCooldown = 0;
     this.boostFireEmit = 0;
@@ -165,6 +254,7 @@ export class Player {
     this._tmp = new THREE.Vector3();
 
     this.velocity = new THREE.Vector3(); // omni velocity (XZ), shared by both modes
+    this.knockbackVelocity = new THREE.Vector3();
 
     // wheel bones (spun manually in vehicle mode for a rolling effect)
     this.wheelBones = [];
@@ -178,26 +268,290 @@ export class Player {
     this.fireTrail = scene ? makeTrail(120, 0xff6a1a, 30, 0.9) : null;
     this.dustEmit = 0;
     this.dustStepSide = 1;
+    this.footstepSfxEmit = 0;
     this.smokeEmit = 0;
+    this.skidEmit = 0;
+    this.skidMarks = [];
     if (scene) {
+      const skidGeo = new THREE.BoxGeometry(0.28, 0.018, 7.2);
       this.dustTrail.points.renderOrder = 20;
       this.fireTrail.points.material.blending = THREE.AdditiveBlending;
+      this.fireTrail.colorStops = [
+        { at: 0, color: new THREE.Color(0xffff75) },
+        { at: 0.18, color: new THREE.Color(0xffb000) },
+        { at: 0.58, color: new THREE.Color(0xff5a00) },
+        { at: 1, color: new THREE.Color(0x5c1700) },
+      ];
       scene.add(this.dustTrail.points);
       scene.add(this.smokeTrail.points);
       scene.add(this.fireTrail.points);
+
+      for (let i = 0; i < SKID_MARK_COUNT; i += 1) {
+        const mat = new THREE.MeshBasicMaterial({
+          color: 0x050505,
+          transparent: true,
+          opacity: 0,
+          depthWrite: false,
+        });
+        const mesh = new THREE.Mesh(skidGeo, mat);
+        mesh.position.y = 0.035;
+        mesh.renderOrder = 8;
+        scene.add(mesh);
+        this.skidMarks.push({ mesh, age: SKID_MARK_LIFETIME, active: false });
+      }
     }
+
+    this.dead = false;
+    this.deathGiblets = [];
+    this.deathGibletGeometry = new THREE.BoxGeometry(1, 1, 1);
+    this.deathGibletMaterials = [
+      new THREE.MeshStandardMaterial({ color: 0xb31d24, metalness: 0.75, roughness: 0.42 }),
+      new THREE.MeshStandardMaterial({ color: 0x1c4faf, metalness: 0.75, roughness: 0.42 }),
+      new THREE.MeshStandardMaterial({ color: 0xb8c5cf, metalness: 0.9, roughness: 0.3 }),
+      new THREE.MeshStandardMaterial({ color: 0x171b22, metalness: 0.85, roughness: 0.38 }),
+      new THREE.MeshStandardMaterial({ color: 0x39d8ff, emissive: 0x1aa6ff, emissiveIntensity: 1.2, metalness: 0.35, roughness: 0.3 }),
+    ];
 
     this.play('idle02');
   }
 
   get speed() { return this.mode === MODE.VEHICLE ? SPEED_VEHICLE : SPEED_ROBOT; }
   get canShoot() { return this.mode === MODE.ROBOT && !this.transforming; }
+  get canAttack() { return this.mode === MODE.ROBOT && !this.transforming && !this.attacking; }
   get boosting() { return this.mode === MODE.VEHICLE && this.boostTimer > 0; }
+  get boostReady() { return this.mode === MODE.VEHICLE && !this.transforming && this.boostCooldown <= 0; }
+  get boostCooldownRatio() { return Math.max(0, Math.min(1, this.boostCooldown / BOOST_COOLDOWN)); }
+
+  // Restore to a fresh robot-at-origin state (used on game restart).
+  reset() {
+    this._clearDeathGiblets();
+    this.dead = false;
+    this.object.visible = true;
+    this.object.position.set(0, 0, 0);
+    this.heading = MODEL_YAW_OFFSET;
+    this.object.rotation.y = this.heading;
+    this.velocity.set(0, 0, 0);
+    this.knockbackVelocity.set(0, 0, 0);
+    this.mode = MODE.ROBOT;
+    this.transforming = false;
+    this.onTransformDone = null;
+    this.transformTimer = 0;
+    this.attacking = false;
+    this.attackCfg = null;
+    this.attackName = null;
+    this.attackHitTime = 0;
+    this.damageFlashTimer = 0;
+    this._setDamageFlash(0);
+    this.boostTimer = 0;
+    this.boostCooldown = 0;
+    this.footstepSfxEmit = 0;
+    this.skidEmit = 0;
+    this._clearSkidMarks();
+    this._setAxeVisible(false);
+    this.play('idle02', { fade: 0.1 });
+  }
+
+  _setAxeVisible(v) { for (const m of this.axeMeshes) m.visible = v; }
+
+  applyKnockback(fromPosition, strength = 16) {
+    const dx = this.object.position.x - fromPosition.x;
+    const dz = this.object.position.z - fromPosition.z;
+    const len = Math.hypot(dx, dz) || 1;
+    this.knockbackVelocity.x += (dx / len) * strength;
+    this.knockbackVelocity.z += (dz / len) * strength;
+  }
+
+  _applyKnockback(dt) {
+    if (this.knockbackVelocity.lengthSq() < 0.001) {
+      this.knockbackVelocity.set(0, 0, 0);
+      return;
+    }
+    this.object.position.x += this.knockbackVelocity.x * dt;
+    this.object.position.z += this.knockbackVelocity.z * dt;
+    this.knockbackVelocity.multiplyScalar(Math.exp(-KNOCKBACK_DRAG * dt));
+  }
+
+  _clearDeathGiblets() {
+    if (!this.scene) return;
+    for (const g of this.deathGiblets) this.scene.remove(g.mesh);
+    this.deathGiblets.length = 0;
+  }
+
+  // Optimus is destroyed: hide the model and blow a fiery debris cloud out of
+  // his position. The trails keep animating afterward via stepDeathFx().
+  explode() {
+    if (this.dead) return;
+    this.dead = true;
+    this.velocity.set(0, 0, 0);
+    this._setAxeVisible(false);
+    this._setDamageFlash(0);
+    this.object.visible = false;
+    this._clearDeathGiblets();
+
+    const base = this.object.position;
+    const center = this._tmp.set(base.x, 4.5, base.z); // mid-body height
+    const v = new THREE.Vector3();
+    const p = new THREE.Vector3();
+
+    // fiery core blast (additive fire trail blooms)
+    for (let i = 0; i < 80; i += 1) {
+      const a = Math.random() * Math.PI * 2;
+      const horiz = 6 + Math.random() * 26;
+      v.set(Math.cos(a) * horiz, 4 + Math.random() * 18, Math.sin(a) * horiz);
+      p.copy(center).set(center.x + (Math.random() - 0.5) * 3, center.y + (Math.random() - 0.5) * 4, center.z + (Math.random() - 0.5) * 3);
+      this._spawnParticle(this.fireTrail, p, v, 0.35 + Math.random() * 0.6,
+        1.2 + Math.random() * 3.2, 0.6 + Math.random() * 1.4, (Math.random() - 0.5) * 12);
+    }
+    // billowing smoke
+    for (let i = 0; i < 55; i += 1) {
+      const a = Math.random() * Math.PI * 2;
+      const horiz = 2 + Math.random() * 10;
+      v.set(Math.cos(a) * horiz, 3 + Math.random() * 7, Math.sin(a) * horiz);
+      p.set(center.x + (Math.random() - 0.5) * 4, center.y + Math.random() * 3, center.z + (Math.random() - 0.5) * 4);
+      this._spawnParticle(this.smokeTrail, p, v, 0.7 + Math.random() * 0.8,
+        2.0 + Math.random() * 3.5, 1.6 + Math.random() * 2.0, (Math.random() - 0.5) * 4);
+    }
+    // low-arc sparks/debris kicked off the ground
+    for (let i = 0; i < 30; i += 1) {
+      const a = Math.random() * Math.PI * 2;
+      const horiz = 10 + Math.random() * 24;
+      v.set(Math.cos(a) * horiz, 6 + Math.random() * 12, Math.sin(a) * horiz);
+      p.set(base.x, 1.5, base.z);
+      this._spawnParticle(this.fireTrail, p, v, 0.4 + Math.random() * 0.5,
+        0.5 + Math.random() * 1.0, 0.3 + Math.random() * 0.6, (Math.random() - 0.5) * 16);
+    }
+
+    for (let i = 0; i < DEATH_GIBLET_COUNT; i += 1) {
+      const mesh = new THREE.Mesh(
+        this.deathGibletGeometry,
+        this.deathGibletMaterials[i % this.deathGibletMaterials.length]
+      );
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      mesh.position.set(
+        center.x + (Math.random() - 0.5) * 3.2,
+        center.y + (Math.random() - 0.5) * 4.2,
+        center.z + (Math.random() - 0.5) * 3.2
+      );
+      mesh.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
+      mesh.scale.set(
+        0.35 + Math.random() * 0.95,
+        0.25 + Math.random() * 0.75,
+        0.35 + Math.random() * 1.1
+      );
+      const a = Math.random() * Math.PI * 2;
+      const horiz = 9 + Math.random() * 22;
+      this.scene.add(mesh);
+      this.deathGiblets.push({
+        mesh,
+        velocity: new THREE.Vector3(Math.cos(a) * horiz, 8 + Math.random() * 18, Math.sin(a) * horiz),
+        spin: new THREE.Vector3(
+          (Math.random() - 0.5) * 16,
+          (Math.random() - 0.5) * 16,
+          (Math.random() - 0.5) * 16
+        ),
+        floorY: mesh.scale.y * 0.5,
+      });
+    }
+  }
+
+  _updateDeathGiblets(dt) {
+    for (const g of this.deathGiblets) {
+      g.velocity.y -= 26 * dt;
+      g.mesh.position.addScaledVector(g.velocity, dt);
+      g.mesh.rotation.x += g.spin.x * dt;
+      g.mesh.rotation.y += g.spin.y * dt;
+      g.mesh.rotation.z += g.spin.z * dt;
+      if (g.mesh.position.y < g.floorY) {
+        g.mesh.position.y = g.floorY;
+        g.velocity.y = Math.abs(g.velocity.y) * 0.32;
+        g.velocity.x *= 0.72;
+        g.velocity.z *= 0.72;
+        g.spin.multiplyScalar(0.82);
+      }
+    }
+  }
+
+  // Keep the death flash/explosion animating while gameplay is paused.
+  stepDeathFx(dt) {
+    this._updateDamageFlash(dt);
+    this._updateTrails(dt);
+    this._updateDeathGiblets(dt);
+    if (this.object.visible) this.mixer.update(dt);
+  }
+
+  flashDamage() {
+    this.damageFlashTimer = DAMAGE_FLASH_DURATION;
+    this._setDamageFlash(1);
+  }
+
+  _setDamageFlash(amount) {
+    const red = new THREE.Color(0xff1f1f);
+    for (const entry of this.damageFlashMaterials) {
+      const { mat } = entry;
+      if (mat.color && entry.color) mat.color.copy(entry.color).lerp(red, amount * 0.72);
+      if (mat.emissive) {
+        if (entry.emissive) mat.emissive.copy(entry.emissive).lerp(red, amount);
+        else mat.emissive.copy(red);
+        mat.emissiveIntensity = entry.emissiveIntensity + amount * 3.2;
+      }
+    }
+  }
+
+  _updateDamageFlash(dt) {
+    if (this.damageFlashTimer <= 0) return;
+    this.damageFlashTimer = Math.max(0, this.damageFlashTimer - dt);
+    const t = this.damageFlashTimer / DAMAGE_FLASH_DURATION;
+    const flicker = 0.45 + Math.abs(Math.sin(this.damageFlashTimer * 55)) * 0.55;
+    this._setDamageFlash(t * flicker);
+    if (this.damageFlashTimer <= 0) this._setDamageFlash(0);
+  }
+
+  // Hold the axe at a constant on-screen size by dividing out Bone_axe's live
+  // (small, animated) world scale. Only matters while the axe is shown.
+  _syncAxeScale() {
+    if (!this.axeBone) return;
+    const boneScale = this.axeBone.getWorldScale(this._tmpScale).x || 1;
+    const s = this._axeWorldScaleTarget / boneScale;
+    for (const m of this.axeMeshes) { if (m.visible) m.scale.setScalar(s); }
+  }
+
+  // Start a one-shot melee attack. Plants the player, plays the clip to
+  // completion (input locked), reveals the weapon for the swing, and fires the
+  // hit window once. Ignored unless in robot mode and not already busy.
+  attack(type) {
+    if (!this.canAttack) return;
+    const cfg = ATTACKS[type];
+    if (!cfg) { console.warn('unknown attack', type); return; }
+    const clip = this.clipByName[cfg.clip];
+    if (!clip) { console.warn('missing attack clip', cfg.clip); return; }
+
+    this.attacking = true;
+    this.attackCfg = cfg;
+    this.attackName = type;
+    this.attackElapsed = 0;
+    const startTime = cfg.startFrame ? cfg.startFrame / ATTACK_ANIM_FPS : 0;
+    const endTime = cfg.endFrame ? cfg.endFrame / ATTACK_ANIM_FPS : clip.duration;
+    this.attackDuration = Math.max(0, Math.min(clip.duration, endTime) - startTime);
+    this.attackHitTime = cfg.hitFrame
+      ? Math.max(0, cfg.hitFrame / ATTACK_ANIM_FPS - startTime)
+      : clip.duration * cfg.hit;
+    this.hitFired = false;
+    this.velocity.set(0, 0, 0); // plant in place; keep current heading
+    if (cfg.weapon === 'axe') { this._setAxeVisible(true); this._syncAxeScale(); }
+    const action = this.play(cfg.clip, { loop: false, fade: cfg.fade, clamp: true });
+    if (action && startTime > 0) action.time = startTime;
+  }
 
   tryBoost() {
     if (this.mode !== MODE.VEHICLE || this.transforming || this.boostCooldown > 0) return;
     this.boostTimer = BOOST_DURATION;
     this.boostCooldown = BOOST_COOLDOWN;
+    this.skidEmit = SKID_MARK_DISTANCE;
+  }
+
+  silenceMovementSfx() {
+    updateMovementSfx({ active: false });
   }
 
   action(name) {
@@ -226,9 +580,10 @@ export class Player {
   }
 
   toggleTransform() {
-    if (this.transforming) return;
+    if (this.transforming || this.attacking) return;
     if (this.mode === MODE.ROBOT) {
       this.transforming = true;
+      playSegment(SFX_TO_VEHICLE.start, SFX_TO_VEHICLE.end, { fadeOut: SFX_TO_VEHICLE.fadeOut });
       const clip = this.clipByName['transform_v'];
       this.transformTimer = clip ? clip.duration : 1.0;
       this.play('transform_v', { loop: false, fade: 0.1, clamp: true });
@@ -239,8 +594,10 @@ export class Player {
       };
     } else {
       this.transforming = true;
+      playSegment(SFX_TO_ROBOT.start, SFX_TO_ROBOT.end);
       this.boostTimer = 0;
       this.boostFireEmit = 0;
+      this.skidEmit = 0;
       this._clearTrail(this.smokeTrail);
       this._clearTrail(this.fireTrail);
       this.smokeEmit = 0;
@@ -309,6 +666,10 @@ export class Player {
     trail.rotations[i] = Math.random() * Math.PI * 2;
     trail.angularSpeeds[i] = angularSpeed;
     trail.seeds[i] = Math.random() * 20;
+    if (trail.colorStops) {
+      sampleColorStops(trail.colorStops, 0, trail._colorTmp).toArray(trail.colors, i * 3);
+      trail.points.geometry.attributes.color.needsUpdate = true;
+    }
     trail.points.geometry.attributes.seed.needsUpdate = true;
   }
 
@@ -323,6 +684,54 @@ export class Player {
     trail.points.geometry.attributes.position.needsUpdate = true;
     trail.points.geometry.attributes.alpha.needsUpdate = true;
     trail.points.geometry.attributes.size.needsUpdate = true;
+  }
+
+  _clearSkidMarks() {
+    for (const mark of this.skidMarks) {
+      mark.active = false;
+      mark.age = SKID_MARK_LIFETIME;
+      mark.mesh.material.opacity = 0;
+      mark.mesh.position.y = -1000;
+    }
+  }
+
+  _spawnSkidMark(position, heading, opacity) {
+    if (!this.skidMarks.length) return;
+    const mark = this.skidMarks.reduce((oldest, candidate) =>
+      candidate.age > oldest.age ? candidate : oldest
+    );
+    mark.active = true;
+    mark.age = 0;
+    mark.mesh.position.set(position.x, 0.035, position.z);
+    mark.mesh.rotation.set(0, heading, 0);
+    mark.mesh.material.opacity = opacity;
+  }
+
+  _stampBoostSkids() {
+    const forward = new THREE.Vector3(Math.sin(this.heading), 0, Math.cos(this.heading));
+    const right = new THREE.Vector3(forward.z, 0, -forward.x);
+    const base = this.object.position;
+    for (const side of [-1, 1]) {
+      const p = base.clone()
+        .addScaledVector(right, side * 0.72)
+        .addScaledVector(forward, -2.0);
+      this._spawnSkidMark(p, this.heading, 0.46);
+    }
+  }
+
+  _updateSkidMarks(dt) {
+    for (const mark of this.skidMarks) {
+      if (!mark.active) continue;
+      mark.age += dt;
+      const t = mark.age / SKID_MARK_LIFETIME;
+      if (t >= 1) {
+        mark.active = false;
+        mark.mesh.material.opacity = 0;
+        mark.mesh.position.y = -1000;
+      } else {
+        mark.mesh.material.opacity = 0.42 * (1 - t) * (1 - t);
+      }
+    }
   }
 
   _stepTrail(trail, dt, riseDrag = 0.98, minY = -Infinity, rise = 0, growth = 1.8) {
@@ -353,15 +762,24 @@ export class Player {
       trail.alphas[i] = (1 - t) * (1 - t);
       trail.rotations[i] += trail.angularSpeeds[i] * dt;
       trail.sizes[i] = trail.baseSizes[i] * (1 + t * (trail.growths[i] || growth));
+      if (trail.colorStops) sampleColorStops(trail.colorStops, t, trail._colorTmp).toArray(trail.colors, i * 3);
     }
 
     trail.points.geometry.attributes.position.needsUpdate = true;
     trail.points.geometry.attributes.alpha.needsUpdate = true;
     trail.points.geometry.attributes.size.needsUpdate = true;
     trail.points.geometry.attributes.rotation.needsUpdate = true;
+    if (trail.colorStops) trail.points.geometry.attributes.color.needsUpdate = true;
   }
 
   _updateTrails(dt) {
+    updateMovementSfx({
+      mode: this.mode,
+      speed: this.velocity.length(),
+      boosting: this.boosting,
+      active: !this.transforming && !this.dead,
+    });
+    this._updateSkidMarks(dt);
     this._stepTrail(this.dustTrail, dt, 0.92, 0.38, 0.45, 2.3);
     this._stepTrail(this.smokeTrail, dt, 0.96);
     this._stepTrail(this.fireTrail, dt, 0.84);
@@ -375,6 +793,12 @@ export class Player {
     const base = this.object.position;
 
     if (this.mode === MODE.ROBOT && !this.transforming) {
+      this.footstepSfxEmit += speed * dt;
+      while (this.footstepSfxEmit >= FOOTSTEP_SFX_DISTANCE) {
+        this.footstepSfxEmit -= FOOTSTEP_SFX_DISTANCE;
+        playMovementSfx('footstep');
+      }
+
       this.dustEmit += speed * dt;
       while (this.dustEmit >= DUST_STEP_DISTANCE) {
         this.dustEmit -= DUST_STEP_DISTANCE;
@@ -425,27 +849,54 @@ export class Player {
       }
 
       if (this.boosting) {
+        this.skidEmit += speed * dt;
+        while (this.skidEmit >= SKID_MARK_DISTANCE) {
+          this.skidEmit -= SKID_MARK_DISTANCE;
+          this._stampBoostSkids();
+        }
+
         this.boostFireEmit += dt * BOOST_FIRE_RATE;
         while (this.boostFireEmit >= 1) {
           this.boostFireEmit -= 1;
-          const side = Math.random() < 0.5 ? -1 : 1;
-          const p = base.clone()
-            .addScaledVector(right, side * (0.35 + Math.random() * 0.45))
-            .addScaledVector(forward, -2.25 + Math.random() * 0.45);
-          p.y = 0.65 + Math.random() * 0.35;
+          for (const side of [-1, 1]) {
+            const nozzle = base.clone()
+              .addScaledVector(right, side * 0.52)
+              .addScaledVector(forward, -2.35);
+            nozzle.y = 0.72 + Math.random() * 0.16;
 
-          const v = backDrift.clone().multiplyScalar(6 + Math.random() * 5);
-          v.addScaledVector(right, (Math.random() - 0.5) * 2.2);
-          v.y = 0.35 + Math.random() * 1.1;
-          this._spawnParticle(
-            this.fireTrail,
-            p,
-            v,
-            0.18 + Math.random() * 0.16,
-            0.45 + Math.random() * 0.9,
-            0.15 + Math.random() * 0.45,
-            (Math.random() - 0.5) * 10
-          );
+            const coreP = nozzle.clone().addScaledVector(forward, -0.25 - Math.random() * 0.35);
+            const coreV = backDrift.clone().multiplyScalar(14 + Math.random() * 6);
+            coreV.addScaledVector(right, side * (Math.random() - 0.5) * 0.55);
+            coreV.y = 0.12 + Math.random() * 0.28;
+            this._spawnParticle(
+              this.fireTrail,
+              coreP,
+              coreV,
+              0.12 + Math.random() * 0.08,
+              0.22 + Math.random() * 0.34,
+              2.4 + Math.random() * 1.2,
+              (Math.random() - 0.5) * 7
+            );
+
+            if (Math.random() < 0.55) {
+              const plumeP = nozzle.clone()
+                .addScaledVector(forward, -0.95 - Math.random() * 0.75)
+                .addScaledVector(right, side * (Math.random() - 0.5) * 0.42);
+              plumeP.y = 0.58 + Math.random() * 0.22;
+              const plumeV = backDrift.clone().multiplyScalar(8 + Math.random() * 5);
+              plumeV.addScaledVector(right, side * (0.35 + Math.random() * 0.65));
+              plumeV.y = 0.18 + Math.random() * 0.45;
+              this._spawnParticle(
+                this.fireTrail,
+                plumeP,
+                plumeV,
+                0.2 + Math.random() * 0.16,
+                0.65 + Math.random() * 1.05,
+                1.1 + Math.random() * 1.0,
+                (Math.random() - 0.5) * 11
+              );
+            }
+          }
         }
       }
     }
@@ -471,6 +922,8 @@ export class Player {
   update(dt, axis) {
     this.boostCooldown = Math.max(0, this.boostCooldown - dt);
     this.boostTimer = Math.max(0, this.boostTimer - dt);
+    this._updateDamageFlash(dt);
+    this._applyKnockback(dt);
 
     // resolve an in-progress transform (input is locked meanwhile)
     if (this.transforming) {
@@ -484,6 +937,27 @@ export class Player {
       }
       this.mixer.update(dt);
       this._updateTrails(dt);
+      return;
+    }
+
+    // resolve an in-progress attack (input locked, player planted in place)
+    if (this.attacking) {
+      this.attackElapsed += dt;
+      if (!this.hitFired && this.attackElapsed >= this.attackHitTime) {
+        this.hitFired = true;
+        if (this.onHit) this.onHit(this.attackName, this.attackCfg);
+      }
+      this.object.rotation.y = this.heading;
+      this.mixer.update(dt);
+      this._syncAxeScale();
+      this._updateTrails(dt);
+      if (this.attackElapsed >= this.attackDuration) {
+        if (this.attackCfg.weapon === 'axe') this._setAxeVisible(false);
+        this.attacking = false;
+        this.attackCfg = null;
+        this.attackName = null;
+        this.attackHitTime = 0;
+      }
       return;
     }
 

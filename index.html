@@ -10,19 +10,71 @@
       #app { position: fixed; inset: 0; }
       canvas { display: block; }
       #overlay {
-        position: fixed; left: 12px; top: 12px;
+        position: fixed; left: 12px; top: 12px; width: 232px;
         font: 13px/1.5 ui-monospace, monospace;
         color: #7fe9ff; text-shadow: 0 0 6px rgba(0,200,255,.6);
-        white-space: pre; z-index: 10;
+        z-index: 10;
         max-height: 92vh; overflow-y: auto;
-        background: rgba(5,8,15,.55); padding: 8px 10px; border-radius: 6px;
+        background: rgba(5,8,15,.55); padding: 10px 12px; border-radius: 6px;
         backdrop-filter: blur(2px);
       }
+      .hud-title { font-weight: bold; letter-spacing: 1px; margin-bottom: 8px; }
+      .hud-row { opacity: .85; margin-top: 6px; font-size: 11px; letter-spacing: .5px; }
+      .bar {
+        position: relative; height: 15px; margin: 3px 0 2px;
+        background: rgba(255,255,255,.1); border-radius: 3px; overflow: hidden;
+        box-shadow: inset 0 0 0 1px rgba(127,233,255,.25);
+      }
+      .bar-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 100%; transition: width .1s linear; }
+      .bar-fill.boost { background: #39d8ff; }
+      .bar-text {
+        position: absolute; inset: 0; text-align: center; line-height: 15px;
+        font-size: 10px; color: #eaffff; text-shadow: 0 0 3px #000;
+      }
+      .hud-stats { display: flex; justify-content: space-between; margin-top: 8px; font-weight: bold; }
+      .hud-controls {
+        margin-top: 10px; padding-top: 8px; border-top: 1px solid rgba(127,233,255,.22);
+        font-size: 11px; line-height: 1.55; color: #d8fbff;
+      }
+      .hud-controls > div:not(.hud-row) { display: flex; justify-content: space-between; gap: 10px; }
+      .hud-controls b { color: #ffffff; font-weight: 800; }
+      .hud-controls span { opacity: .78; text-align: right; }
+      #hitflash {
+        position: fixed; inset: 0; pointer-events: none; z-index: 20; opacity: 0;
+        background: radial-gradient(ellipse at center, rgba(255,0,0,0) 45%, rgba(255,30,40,.6) 100%);
+      }
+      #gameover, #pausemenu {
+        position: fixed; inset: 0; z-index: 30; display: none;
+        flex-direction: column; align-items: center; justify-content: center;
+        background: rgba(5,8,15,.72); backdrop-filter: blur(3px);
+        font: 600 14px ui-monospace, monospace; color: #ff5a6a;
+        text-shadow: 0 0 12px rgba(255,40,60,.7);
+      }
+      #pausemenu { z-index: 28; color: #9fe9ff; text-shadow: 0 0 12px rgba(0,200,255,.7); }
+      #gameover.show, #pausemenu.show { display: flex; }
+      #gameover .go-title, #pausemenu .pause-title { font-size: 46px; letter-spacing: 5px; font-weight: 800; }
+      #gameover .go-sub { margin-top: 12px; color: #9fe9ff; text-shadow: 0 0 8px rgba(0,200,255,.6); }
+      #gameover .go-hint, #pausemenu .pause-hint { margin-top: 20px; opacity: .7; color: #cfe9ff; }
+      #pausemenu .pause-options { margin-top: 16px; display: grid; gap: 8px; color: #eaffff; }
     </style>
   </head>
   <body>
     <div id="app"></div>
     <div id="overlay">loading...</div>
+    <div id="hitflash"></div>
+    <div id="gameover">
+      <div class="go-title">GAME OVER</div>
+      <div class="go-sub" id="go-stats"></div>
+      <div class="go-hint">Press ENTER to redeploy</div>
+    </div>
+    <div id="pausemenu">
+      <div class="pause-title">PAUSED</div>
+      <div class="pause-options">
+        <div>ESC: Continue</div>
+        <div>ENTER: Restart</div>
+      </div>
+      <div class="pause-hint">Gameplay is frozen</div>
+    </div>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>
