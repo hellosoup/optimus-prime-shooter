@@ -18,8 +18,37 @@
         background: rgba(5,8,15,.55); padding: 10px 12px; border-radius: 6px;
         backdrop-filter: blur(2px);
       }
+      #debug-menu {
+        position: fixed; right: 12px; top: 12px; width: 232px;
+        font: 13px/1.5 ui-monospace, monospace;
+        color: #7fe9ff; text-shadow: 0 0 6px rgba(0,200,255,.6);
+        z-index: 10;
+        background: rgba(5,8,15,.55); padding: 10px 12px; border-radius: 6px;
+        backdrop-filter: blur(2px);
+        box-shadow: inset 0 0 0 1px rgba(127,233,255,.12);
+      }
       .hud-title { font-weight: bold; letter-spacing: 1px; margin-bottom: 8px; }
       .hud-row { opacity: .85; margin-top: 6px; font-size: 11px; letter-spacing: .5px; }
+      .debug-title { font-weight: bold; letter-spacing: 1px; margin-bottom: 8px; color: #eaffff; }
+      .debug-row {
+        display: flex; align-items: center; justify-content: space-between; gap: 10px;
+        margin-top: 6px; font-size: 11px; letter-spacing: .5px; color: #d8fbff;
+      }
+      .debug-row input { accent-color: #39d8ff; }
+      .debug-animation { margin-top: 10px; padding-top: 8px; border-top: 1px solid rgba(127,233,255,.22); }
+      .debug-animation-name {
+        margin: 5px 0 7px; min-height: 18px; color: #eaffff;
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      }
+      .debug-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+      .debug-buttons button {
+        border: 1px solid rgba(127,233,255,.35); border-radius: 4px;
+        background: rgba(57,216,255,.12); color: #eaffff;
+        font: 11px/1.4 ui-monospace, monospace; padding: 5px 6px;
+        cursor: pointer; text-shadow: 0 0 4px rgba(0,200,255,.55);
+      }
+      .debug-buttons button:disabled { opacity: .38; cursor: default; }
+      #debug-anim-resume { grid-column: 1 / -1; }
       .bar {
         position: relative; height: 15px; margin: 3px 0 2px;
         background: rgba(255,255,255,.1); border-radius: 3px; overflow: hidden;
@@ -80,7 +109,7 @@
       #gameover .go-hint, #pausemenu .pause-hint { margin-top: 20px; opacity: .7; color: #cfe9ff; }
       #pausemenu .pause-options { margin-top: 16px; display: grid; gap: 8px; color: #eaffff; }
       #intro {
-        position: fixed; inset: 0; z-index: 100; overflow: hidden; cursor: pointer;
+        position: fixed; inset: 0; z-index: 100; overflow: hidden;
         background: transparent;
       }
       #intro.done { display: none; }
@@ -105,6 +134,7 @@
         position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
         transition: opacity .45s ease-out;
       }
+      #intro:not(.started) .intro-stage { display: none; }
       #intro.split .intro-stage { opacity: 0; }
       .intro-stage::before {
         content: ""; position: absolute; inset: 0;
@@ -125,6 +155,31 @@
         animation: intro-emblem-in 1.6s ease-out .25s both, intro-emblem-pulse 2.4s ease-in-out 1.8s infinite;
       }
       .intro-autobot img { width: 100%; height: 100%; display: block; object-fit: contain; mix-blend-mode: screen; }
+      .intro-start {
+        position: absolute; inset: 0; display: flex; flex-direction: column;
+        align-items: center; justify-content: center; gap: 18px;
+        background:
+          radial-gradient(ellipse at center, rgba(56,189,248,.1), transparent 48%),
+          #050507;
+        transition: opacity .35s ease-out;
+      }
+      #intro.started .intro-start { opacity: 0; pointer-events: none; }
+      .intro-start-button {
+        border: 1px solid rgba(127,233,255,.52); border-radius: 6px;
+        background: rgba(57,216,255,.14); color: #eaffff;
+        font: 900 16px/1 ui-monospace, monospace; letter-spacing: .16em;
+        padding: 13px 28px; cursor: pointer;
+        box-shadow: 0 0 18px rgba(0,200,255,.2), inset 0 0 18px rgba(0,200,255,.12);
+        text-shadow: 0 0 8px rgba(0,200,255,.8);
+      }
+      .intro-start-button:hover, .intro-start-button:focus-visible {
+        background: rgba(57,216,255,.22);
+        outline: none;
+      }
+      .intro-start-status {
+        min-height: 14px; font: 700 11px/1 ui-monospace, monospace;
+        letter-spacing: .12em; color: rgba(216,251,255,.78);
+      }
       @keyframes intro-scan {
         0% { top: -2%; opacity: 0; }
         15%, 85% { opacity: 1; }
@@ -149,9 +204,13 @@
     </style>
   </head>
   <body>
-    <div id="intro" aria-hidden="true">
+    <div id="intro">
       <div class="intro-panel top"><div class="intro-edge"></div></div>
       <div class="intro-panel bottom"><div class="intro-edge"></div></div>
+      <div class="intro-start">
+        <button class="intro-start-button" id="intro-start-button" type="button">START</button>
+        <div class="intro-start-status" id="intro-start-status"></div>
+      </div>
       <div class="intro-stage">
         <div class="intro-autobot">
           <img src="/characters/sigil-autobot.png" alt="" />
@@ -160,6 +219,26 @@
     </div>
     <div id="app"></div>
     <div id="overlay">loading...</div>
+    <div id="debug-menu" aria-label="Debug menu">
+      <div class="debug-title">DEBUG</div>
+      <label class="debug-row">
+        <span>GOD MODE</span>
+        <input id="debug-god-mode" type="checkbox" />
+      </label>
+      <label class="debug-row">
+        <span>ENEMIES STOP</span>
+        <input id="debug-freeze-enemies" type="checkbox" />
+      </label>
+      <div class="debug-animation">
+        <div class="hud-row">OPTIMUS ANIMATION</div>
+        <div class="debug-animation-name" id="debug-animation-name">loading...</div>
+        <div class="debug-buttons">
+          <button id="debug-anim-prev" type="button">PREV</button>
+          <button id="debug-anim-next" type="button">NEXT</button>
+          <button id="debug-anim-resume" type="button">RESUME GAME ANIM</button>
+        </div>
+      </div>
+    </div>
     <div id="wave-banner"></div>
     <div id="radar"><canvas id="radar-canvas" width="128" height="128"></canvas></div>
     <div id="hitflash"></div>
@@ -179,42 +258,79 @@
     <script>
       (() => {
         const intro = document.getElementById('intro');
+        const startButton = document.getElementById('intro-start-button');
+        const startStatus = document.getElementById('intro-start-status');
         if (!intro) return;
         window.__introDone = false;
+        const INTRO_SFX_VOLUME = 0.75;
+        const INTRO_SFX_FADE_MS = 260;
+        const INTRO_SPLIT_MS = 3400;
+        const INTRO_DONE_MS = 4900;
         const audio = new Audio('/sfx/G1-Scene-Transition-Effect.ogg');
-        audio.volume = 0.75;
+        audio.volume = INTRO_SFX_VOLUME;
         audio.preload = 'auto';
-        let introSfxPlayed = false;
+        let introStarted = false;
         let introFinished = false;
-        const playIntroSfx = () => {
-          if (introSfxPlayed) return;
-          audio.play()
-            .then(() => { introSfxPlayed = true; })
-            .catch(() => {});
+        let introSfxFade = null;
+        const stopIntroSfx = () => {
+          window.clearInterval(introSfxFade);
+          if (audio.paused) {
+            audio.volume = INTRO_SFX_VOLUME;
+            return 0;
+          }
+
+          const startedAt = performance.now();
+          const startVolume = audio.volume;
+          introSfxFade = window.setInterval(() => {
+            const t = Math.min(1, (performance.now() - startedAt) / INTRO_SFX_FADE_MS);
+            audio.volume = startVolume * (1 - t);
+            if (t >= 1) {
+              window.clearInterval(introSfxFade);
+              audio.pause();
+              audio.currentTime = 0;
+              audio.volume = INTRO_SFX_VOLUME;
+            }
+          }, 16);
+          return INTRO_SFX_FADE_MS;
         };
-        const unlockIntroSfx = () => playIntroSfx();
-        window.addEventListener('pointerdown', unlockIntroSfx, { once: true, capture: true });
-        window.addEventListener('keydown', unlockIntroSfx, { once: true, capture: true });
-        const finish = (musicDelay = 0) => {
+        const revealGame = () => {
+          intro.classList.add('split');
+          const introSfxDelay = stopIntroSfx();
+          window.setTimeout(() => {
+            window.dispatchEvent(new Event('introreveal'));
+          }, introSfxDelay);
+        };
+        const finish = () => {
           if (introFinished) return;
           introFinished = true;
           intro.classList.add('done');
-          window.setTimeout(() => {
-            window.__introDone = true;
-            window.dispatchEvent(new Event('introdone'));
-          }, musicDelay);
+          window.__introDone = true;
+          window.dispatchEvent(new Event('introdone'));
         };
-        const split = window.setTimeout(() => intro.classList.add('split'), 3400);
-        const done = window.setTimeout(() => finish(0), 4900);
-        const skip = () => {
-          window.clearTimeout(split);
-          window.clearTimeout(done);
-          finish(1200);
+        const startIntro = () => {
+          if (introStarted) return;
+          if (startButton) startButton.disabled = true;
+          if (startStatus) startStatus.textContent = 'STARTING...';
+          audio.currentTime = 0;
+          audio.volume = INTRO_SFX_VOLUME;
+          audio.play()
+            .then(() => {
+              introStarted = true;
+              intro.classList.add('started');
+              if (startStatus) startStatus.textContent = '';
+              window.setTimeout(revealGame, INTRO_SPLIT_MS);
+              window.setTimeout(finish, INTRO_DONE_MS);
+            })
+            .catch(() => {
+              if (startButton) startButton.disabled = false;
+              if (startStatus) startStatus.textContent = 'AUDIO BLOCKED - TRY AGAIN';
+            });
         };
         audio.load();
-        playIntroSfx();
-        window.addEventListener('pointerdown', skip, { once: true });
-        window.addEventListener('keydown', skip, { once: true });
+        if (startButton) {
+          startButton.addEventListener('click', startIntro);
+          startButton.focus();
+        }
       })();
     </script>
     <script type="module" src="/src/main.js"></script>

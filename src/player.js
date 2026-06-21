@@ -180,11 +180,17 @@ export class Player {
     this.scene = scene;
 
     this.clipByName = {};
-    clips.forEach((c) => { this.clipByName[shortClip(c.name)] = c; });
+    this.clipNames = [];
+    clips.forEach((c) => {
+      const name = shortClip(c.name);
+      this.clipByName[name] = c;
+      if (!this.clipNames.includes(name)) this.clipNames.push(name);
+    });
 
     this.actions = {};
     this.current = null;
     this.currentName = null;
+    this.debugAnimationPreview = false;
 
     this.mode = MODE.ROBOT;
     this.transforming = false;
@@ -355,6 +361,7 @@ export class Player {
     this.attackHitTime = 0;
     this.damageFlashTimer = 0;
     this._setDamageFlash(0);
+    this.debugAnimationPreview = false;
     this.boostTimer = 0;
     this.boostCooldown = 0;
     this.footstepSfxEmit = 0;
@@ -365,6 +372,31 @@ export class Player {
   }
 
   _setAxeVisible(v) { for (const m of this.axeMeshes) m.visible = v; }
+
+  getAnimationNames() {
+    return [...this.clipNames];
+  }
+
+  previewAnimation(name) {
+    if (!this.clipByName[name]) return false;
+    this.debugAnimationPreview = true;
+    this.attacking = false;
+    this.transforming = false;
+    this.onTransformDone = null;
+    this.transformTimer = 0;
+    this.transformDuration = 0;
+    this._setAxeVisible(false);
+    this.velocity.set(0, 0, 0);
+    this.knockbackVelocity.set(0, 0, 0);
+    this.play(name, { loop: true, fade: 0.12 });
+    return true;
+  }
+
+  clearAnimationPreview() {
+    if (!this.debugAnimationPreview) return;
+    this.debugAnimationPreview = false;
+    this.play(this.mode === MODE.VEHICLE ? 'vehicle_idle01' : 'idle02', { fade: 0.12 });
+  }
 
   _spawnTransformRing(color = 0x39d8ff) {
     if (!this.scene) return;
@@ -602,6 +634,7 @@ export class Player {
   // completion (input locked), reveals the weapon for the swing, and fires the
   // hit window once. Ignored unless in robot mode and not already busy.
   attack(type) {
+    if (this.debugAnimationPreview) return;
     if (!this.canAttack) return;
     const cfg = ATTACKS[type];
     if (!cfg) { console.warn('unknown attack', type); return; }
@@ -626,6 +659,7 @@ export class Player {
   }
 
   tryBoost() {
+    if (this.debugAnimationPreview) return;
     if (this.mode !== MODE.VEHICLE || this.transforming || this.boostCooldown > 0) return;
     this.boostTimer = BOOST_DURATION;
     this.boostCooldown = BOOST_COOLDOWN;
@@ -662,6 +696,7 @@ export class Player {
   }
 
   toggleTransform() {
+    if (this.debugAnimationPreview) return;
     if (this.transforming || this.attacking) return;
     if (this.mode === MODE.ROBOT) {
       this.transforming = true;
@@ -1013,6 +1048,14 @@ export class Player {
     this.boostTimer = Math.max(0, this.boostTimer - dt);
     this._updateDamageFlash(dt);
     this._applyKnockback(dt);
+
+    if (this.debugAnimationPreview) {
+      this.velocity.set(0, 0, 0);
+      this.knockbackVelocity.set(0, 0, 0);
+      this.mixer.update(dt);
+      this._updateTrails(dt);
+      return;
+    }
 
     // resolve an in-progress transform (input is locked meanwhile)
     if (this.transforming) {

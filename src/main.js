@@ -21,20 +21,15 @@ import { HealthPackManager } from './healthPacks.js';
 import { RubiksCubeManager } from './rubiksCube.js';
 import { PhysicsWorld } from './physicsWorld.js';
 import { initHud, updateHud, showGameOver, hideGameOver, showPause, hidePause, showWaveBanner } from './hud.js';
+import { bindDebugPlayer, debugState, initDebugMenu } from './debugMenu.js';
 
 const transformSfxReady = loadSfx('/sfx/Tf_sound.ogg');
 
-// Browser autoplay policy blocks audio until a user gesture, so kick off the
-// auto-cycling music playlist (track 3 -> 1 -> 2, repeating) on first input.
-const startMusicOnce = () => {
-  const start = () => startMusicPlaylist();
-  if (window.__introDone === false) window.addEventListener('introdone', start, { once: true });
-  else start();
-  window.removeEventListener('pointerdown', startMusicOnce);
-  window.removeEventListener('keydown', startMusicOnce);
-};
-window.addEventListener('pointerdown', startMusicOnce);
-window.addEventListener('keydown', startMusicOnce);
+// The intro script owns audio unlock. Once the screen starts splitting open, the
+// background playlist fades in; gameplay starts later on `introdone`.
+const startMusicOnReveal = () => startMusicPlaylist();
+if (window.__introDone === false) window.addEventListener('introreveal', startMusicOnReveal, { once: true });
+else startMusicOnReveal();
 
 // glTF clip names arrive as "OptimusPrime_G1|idle02|Base Layer"; shorten them.
 const shortClip = (name) => {
@@ -44,6 +39,7 @@ const shortClip = (name) => {
 
 const overlay = document.getElementById('overlay');
 const app = document.getElementById('app');
+initDebugMenu();
 
 // ---- renderer ----
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -260,6 +256,10 @@ function addCameraShake(strength, duration) {
 
 function damagePlayer(amount, sourcePosition = null) {
   if (gameState !== 'playing' || iframe > 0) return;
+  if (debugState.godMode) {
+    health = MAX_HP;
+    return;
+  }
   health = Math.max(0, health - amount);
   iframe = IFRAME_TIME;
   hitFlash = 1;
@@ -394,6 +394,7 @@ async function bootGame() {
 
     const mixer = new THREE.AnimationMixer(obj);
     player = new Player({ object: obj, mixer, clips: gltf.animations || [], shortClip, scene });
+    bindDebugPlayer(player);
     // Attacks destroy enemies in range when the hit window opens.
     player.onHit = (type) => {
       const ballHits = beachBallManager.handleAttack(type, player.object.position, player.heading);
@@ -489,7 +490,7 @@ function animate() {
         ...dominoManager.getObstacles(),
         ...legoPyramidManager.getObstacles(),
         ...rubiksCubeManager.getObstacles(),
-      ]);
+      ], { freezeMovement: debugState.freezeEnemies });
       healthPackManager.update(dt, player, (amount) => {
         if (health >= MAX_HP) return false;
         health = Math.min(MAX_HP, health + amount);

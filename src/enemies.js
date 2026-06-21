@@ -338,7 +338,7 @@ export class EnemyManager {
     });
   }
 
-  update(dt, player, onPlayerHit, obstacles = []) {
+  update(dt, player, onPlayerHit, obstacles = [], { freezeMovement = false } = {}) {
     this._updateEffects(dt);
 
     const ppos = player.object.position;
@@ -367,6 +367,8 @@ export class EnemyManager {
 
     for (let i = this.enemies.length - 1; i >= 0; i--) {
       const e = this.enemies[i];
+      e.hitCD = Math.max(0, e.hitCD - dt);
+      if (freezeMovement) continue;
 
       // seek the player, steering around solid obstacles like beach balls
       this._tmp.set(ppos.x - e.mesh.position.x, 0, ppos.z - e.mesh.position.z);
@@ -449,8 +451,6 @@ export class EnemyManager {
         other.mesh.position.x -= nx * push;
         other.mesh.position.z -= nz * push;
       }
-
-      e.hitCD = Math.max(0, e.hitCD - dt);
 
       if (d < contactDist) {
         if (ramKill) {
