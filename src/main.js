@@ -574,7 +574,8 @@ function animate() {
     updateHud({
       health, maxHealth: MAX_HP,
       mode: player.mode, transforming: player.transforming,
-      boosting: player.boosting, boostReady: player.boostReady, boostCooldownRatio: player.boostCooldownRatio,
+      boosting: player.boosting, boostReady: player.boostReady,
+      boostActiveRatio: player.boostActiveRatio, boostCooldownRatio: player.boostCooldownRatio,
       wave: enemyManager.wave, kills: enemyManager.kills, enemies: enemyManager.alive,
       waveBreak: enemyManager.waveBreak, hitFlash,
       playerPos: player.object.position,

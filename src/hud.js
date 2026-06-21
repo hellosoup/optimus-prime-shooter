@@ -119,7 +119,7 @@ export function updateHud(s) {
     el.boostFill.style.opacity = '0.25';
     el.boostText.textContent = 'TRUCK MODE ONLY';
   } else if (s.boosting) {
-    el.boostFill.style.width = '100%';
+    el.boostFill.style.width = (s.boostActiveRatio * 100).toFixed(1) + '%';
     el.boostFill.style.opacity = '1';
     el.boostText.textContent = 'BOOSTING';
   } else if (s.boostReady) {

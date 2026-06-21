@@ -337,6 +337,7 @@ export class Player {
   get canAttack() { return this.mode === MODE.ROBOT && !this.transforming && !this.attacking; }
   get boosting() { return this.mode === MODE.VEHICLE && this.boostTimer > 0; }
   get boostReady() { return this.mode === MODE.VEHICLE && !this.transforming && this.boostCooldown <= 0; }
+  get boostActiveRatio() { return Math.max(0, Math.min(1, this.boostTimer / BOOST_DURATION)); }
   get boostCooldownRatio() { return Math.max(0, Math.min(1, this.boostCooldown / BOOST_COOLDOWN)); }
 
   // Restore to a fresh robot-at-origin state (used on game restart).
@@ -660,9 +661,8 @@ export class Player {
 
   tryBoost() {
     if (this.debugAnimationPreview) return;
-    if (this.mode !== MODE.VEHICLE || this.transforming || this.boostCooldown > 0) return;
+    if (this.mode !== MODE.VEHICLE || this.transforming || this.boosting || this.boostCooldown > 0) return;
     this.boostTimer = BOOST_DURATION;
-    this.boostCooldown = BOOST_COOLDOWN;
     this.skidEmit = SKID_MARK_DISTANCE;
   }
 
@@ -1044,8 +1044,13 @@ export class Player {
   }
 
   update(dt, axis) {
-    this.boostCooldown = Math.max(0, this.boostCooldown - dt);
+    const wasBoosting = this.boostTimer > 0;
     this.boostTimer = Math.max(0, this.boostTimer - dt);
+    if (wasBoosting && this.boostTimer <= 0) {
+      this.boostCooldown = BOOST_COOLDOWN;
+    } else if (!wasBoosting) {
+      this.boostCooldown = Math.max(0, this.boostCooldown - dt);
+    }
     this._updateDamageFlash(dt);
     this._applyKnockback(dt);
 
