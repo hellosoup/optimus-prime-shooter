@@ -42,6 +42,7 @@ const BOOST_FIRE_RATE = 145;
 const SKID_MARK_COUNT = 90;
 const SKID_MARK_DISTANCE = 2.4;
 const SKID_MARK_LIFETIME = 5.2;
+const TRANSFORM_SPARK_COUNT = 90;
 const DAMAGE_FLASH_DURATION = 0.45;
 const DEATH_GIBLET_COUNT = 34;
 
@@ -188,6 +189,8 @@ export class Player {
     this.mode = MODE.ROBOT;
     this.transforming = false;
     this.transformTimer = 0;
+    this.transformDuration = 0;
+    this.transformRingFired = false;
     this.onTransformDone = null;
 
     // attack state (robot-mode melee); locks locomotion until the swing ends
@@ -266,6 +269,7 @@ export class Player {
     this.dustTrail = scene ? makeTrail(120, 0xa68f6f, 34, 0.45, false) : null;
     this.smokeTrail = scene ? makeTrail(140, 0x87909a, 24) : null;
     this.fireTrail = scene ? makeTrail(120, 0xff6a1a, 30, 0.9) : null;
+    this.transformSparkTrail = scene ? makeTrail(TRANSFORM_SPARK_COUNT, 0xa9fbff, 24, 0.95, false) : null;
     this.dustEmit = 0;
     this.dustStepSide = 1;
     this.footstepSfxEmit = 0;
@@ -285,6 +289,13 @@ export class Player {
       scene.add(this.dustTrail.points);
       scene.add(this.smokeTrail.points);
       scene.add(this.fireTrail.points);
+      this.transformSparkTrail.points.material.blending = THREE.AdditiveBlending;
+      this.transformSparkTrail.colorStops = [
+        { at: 0, color: new THREE.Color(0xeaffff) },
+        { at: 0.35, color: new THREE.Color(0x54d8ff) },
+        { at: 1, color: new THREE.Color(0x1760ff) },
+      ];
+      scene.add(this.transformSparkTrail.points);
 
       for (let i = 0; i < SKID_MARK_COUNT; i += 1) {
         const mat = new THREE.MeshBasicMaterial({
@@ -336,6 +347,8 @@ export class Player {
     this.transforming = false;
     this.onTransformDone = null;
     this.transformTimer = 0;
+    this.transformDuration = 0;
+    this.transformRingFired = false;
     this.attacking = false;
     this.attackCfg = null;
     this.attackName = null;
@@ -352,6 +365,75 @@ export class Player {
   }
 
   _setAxeVisible(v) { for (const m of this.axeMeshes) m.visible = v; }
+
+  _spawnTransformRing(color = 0x39d8ff) {
+    if (!this.scene) return;
+    const ringMat = new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0.8,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(1.2, 0.06, 8, 80), ringMat);
+    ring.rotation.x = Math.PI / 2;
+    ring.position.set(this.object.position.x, 0.08, this.object.position.z);
+    ring.renderOrder = 12;
+    this.scene.add(ring);
+
+    const start = performance.now();
+    const animateRing = () => {
+      const t = Math.min(1, (performance.now() - start) / 520);
+      ring.scale.setScalar(1 + t * 9);
+      ring.material.opacity = 0.8 * (1 - t) * (1 - t);
+      if (t < 1) requestAnimationFrame(animateRing);
+      else {
+        this.scene.remove(ring);
+        ring.geometry.dispose();
+        ring.material.dispose();
+      }
+    };
+    animateRing();
+  }
+
+  _burstTransformSparks(mult = 1) {
+    if (!this.transformSparkTrail) return;
+    const base = this.object.position;
+    for (let i = 0; i < 34 * mult; i += 1) {
+      const a = Math.random() * Math.PI * 2;
+      const r = 0.8 + Math.random() * 3.6;
+      const p = new THREE.Vector3(
+        base.x + Math.cos(a) * r,
+        1.2 + Math.random() * 7.2,
+        base.z + Math.sin(a) * r
+      );
+      const v = new THREE.Vector3(
+        Math.cos(a) * (4 + Math.random() * 9),
+        1.5 + Math.random() * 6,
+        Math.sin(a) * (4 + Math.random() * 9)
+      );
+      this._spawnParticle(
+        this.transformSparkTrail,
+        p,
+        v,
+        0.18 + Math.random() * 0.32,
+        0.35 + Math.random() * 0.9,
+        0.2 + Math.random() * 0.9,
+        (Math.random() - 0.5) * 14
+      );
+    }
+  }
+
+  _burstTransformDust() {
+    if (!this.dustTrail) return;
+    const base = this.object.position;
+    for (let i = 0; i < 28; i += 1) {
+      const a = Math.random() * Math.PI * 2;
+      const p = new THREE.Vector3(base.x + Math.cos(a) * 1.2, 0.45, base.z + Math.sin(a) * 1.2);
+      const v = new THREE.Vector3(Math.cos(a) * (2 + Math.random() * 7), 0.4 + Math.random() * 1.6, Math.sin(a) * (2 + Math.random() * 7));
+      this._spawnParticle(this.dustTrail, p, v, 0.28 + Math.random() * 0.35, 0.6 + Math.random() * 1.4, 1.1, (Math.random() - 0.5) * 8);
+    }
+  }
 
   applyKnockback(fromPosition, strength = 16) {
     const dx = this.object.position.x - fromPosition.x;
@@ -586,10 +668,13 @@ export class Player {
       playSegment(SFX_TO_VEHICLE.start, SFX_TO_VEHICLE.end, { fadeOut: SFX_TO_VEHICLE.fadeOut });
       const clip = this.clipByName['transform_v'];
       this.transformTimer = clip ? clip.duration : 1.0;
+      this.transformDuration = this.transformTimer;
+      this.transformRingFired = false;
       this.play('transform_v', { loop: false, fade: 0.1, clamp: true });
       this.onTransformDone = () => {
         this.mode = MODE.VEHICLE;
         this.wheelDetected = false;
+        this._burstTransformDust();
         this.play('vehicle_idle01', { loop: true, fade: 0.15 });
       };
     } else {
@@ -604,10 +689,13 @@ export class Player {
       const clip = this.clipByName['transform_r'];
       const dur = clip ? clip.duration : 1.3;
       this.transformTimer = TRANSFORM_TO_ROBOT_TIME;
+      this.transformDuration = this.transformTimer;
+      this.transformRingFired = false;
       // speed the long unfold clip up to finish within TRANSFORM_TO_ROBOT_TIME
       this.play('transform_r', { loop: false, fade: 0.1, clamp: true, timeScale: dur / TRANSFORM_TO_ROBOT_TIME });
       this.onTransformDone = () => {
         this.mode = MODE.ROBOT;
+        this._burstTransformDust();
         this.play('idle02', { loop: true, fade: 0.2 });
       };
     }
@@ -783,6 +871,7 @@ export class Player {
     this._stepTrail(this.dustTrail, dt, 0.92, 0.38, 0.45, 2.3);
     this._stepTrail(this.smokeTrail, dt, 0.96);
     this._stepTrail(this.fireTrail, dt, 0.84);
+    this._stepTrail(this.transformSparkTrail, dt, 0.82);
 
     const speed = this.velocity.length();
     if (speed < 1) return;
@@ -929,8 +1018,14 @@ export class Player {
     if (this.transforming) {
       this._coastToStop(dt);
       this.transformTimer -= dt;
+      if (!this.transformRingFired && this.transformTimer <= this.transformDuration * 0.5) {
+        this.transformRingFired = true;
+        this._spawnTransformRing(this.mode === MODE.ROBOT ? 0x39d8ff : 0x8ff5ff);
+      }
       if (this.transformTimer <= 0) {
         this.transforming = false;
+        this.transformDuration = 0;
+        this.transformRingFired = false;
         const done = this.onTransformDone;
         this.onTransformDone = null;
         if (done) done();

@@ -6,8 +6,12 @@ const hitflash = document.getElementById('hitflash');
 const gameover = document.getElementById('gameover');
 const goStats = document.getElementById('go-stats');
 const pausemenu = document.getElementById('pausemenu');
+const waveBanner = document.getElementById('wave-banner');
+const radarCanvas = document.getElementById('radar-canvas');
+const radarCtx = radarCanvas ? radarCanvas.getContext('2d') : null;
 
 let el = null;
+let waveBannerTimer = null;
 
 export function initHud() {
   overlay.innerHTML = `
@@ -48,6 +52,57 @@ function hpColor(pct) {
   return '#ff4a5a';
 }
 
+function drawRadar(playerPos, enemies = []) {
+  if (!radarCtx || !playerPos) return;
+  const w = radarCanvas.width;
+  const h = radarCanvas.height;
+  const cx = w / 2;
+  const cy = h / 2;
+  const r = w * 0.44;
+  const range = 120;
+
+  radarCtx.clearRect(0, 0, w, h);
+  radarCtx.save();
+  radarCtx.beginPath();
+  radarCtx.arc(cx, cy, r, 0, Math.PI * 2);
+  radarCtx.clip();
+
+  radarCtx.strokeStyle = 'rgba(127,233,255,.22)';
+  radarCtx.lineWidth = 1;
+  for (const rr of [r * 0.35, r * 0.68, r]) {
+    radarCtx.beginPath();
+    radarCtx.arc(cx, cy, rr, 0, Math.PI * 2);
+    radarCtx.stroke();
+  }
+  for (const enemy of enemies) {
+    const dx = enemy.x - playerPos.x;
+    const dz = enemy.z - playerPos.z;
+    const dist = Math.hypot(dx, dz);
+    const clamped = Math.min(dist, range);
+    const scale = (clamped / range) * r;
+    const nx = dist > 0.001 ? dx / dist : 0;
+    const nz = dist > 0.001 ? dz / dist : 0;
+    const x = cx + nx * scale;
+    const y = cy + nz * scale;
+
+    radarCtx.fillStyle = dist > range ? 'rgba(255,74,90,.55)' : '#ff4a5a';
+    radarCtx.shadowColor = '#ff2030';
+    radarCtx.shadowBlur = 8;
+    radarCtx.beginPath();
+    radarCtx.arc(x, y, dist > range ? 2.2 : 3.2, 0, Math.PI * 2);
+    radarCtx.fill();
+  }
+
+  radarCtx.shadowBlur = 10;
+  radarCtx.shadowColor = '#39d8ff';
+  radarCtx.fillStyle = '#9fffff';
+  radarCtx.beginPath();
+  radarCtx.arc(cx, cy, 4, 0, Math.PI * 2);
+  radarCtx.fill();
+
+  radarCtx.restore();
+}
+
 export function updateHud(s) {
   if (!el) return;
 
@@ -84,6 +139,7 @@ export function updateHud(s) {
     : `enemies: ${s.enemies}`;
 
   hitflash.style.opacity = String(Math.max(0, Math.min(1, s.hitFlash)));
+  drawRadar(s.playerPos, s.enemyPositions);
 }
 
 export function showGameOver(s) {
@@ -101,4 +157,15 @@ export function showPause() {
 
 export function hidePause() {
   pausemenu.classList.remove('show');
+}
+
+export function showWaveBanner(wave) {
+  if (!waveBanner) return;
+  if (waveBannerTimer) clearTimeout(waveBannerTimer);
+  waveBanner.textContent = `WAVE ${wave}`;
+  waveBanner.classList.add('show');
+  waveBannerTimer = setTimeout(() => {
+    waveBanner.classList.remove('show');
+    waveBannerTimer = null;
+  }, 1700);
 }

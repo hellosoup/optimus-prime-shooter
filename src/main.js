@@ -7,6 +7,7 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { AfterimagePass } from 'three/examples/jsm/postprocessing/AfterimagePass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
+import { SMAAPass } from 'three/examples/jsm/postprocessing/SMAAPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { input } from './input.js';
 import { Player, MODE } from './player.js';
@@ -18,14 +19,17 @@ import { DominoManager } from './dominoes.js';
 import { LegoPyramidManager } from './legoPyramid.js';
 import { HealthPackManager } from './healthPacks.js';
 import { RubiksCubeManager } from './rubiksCube.js';
-import { initHud, updateHud, showGameOver, hideGameOver, showPause, hidePause } from './hud.js';
+import { PhysicsWorld } from './physicsWorld.js';
+import { initHud, updateHud, showGameOver, hideGameOver, showPause, hidePause, showWaveBanner } from './hud.js';
 
-loadSfx('/sfx/Tf_sound.ogg');
+const transformSfxReady = loadSfx('/sfx/Tf_sound.ogg');
 
 // Browser autoplay policy blocks audio until a user gesture, so kick off the
 // auto-cycling music playlist (track 3 -> 1 -> 2, repeating) on first input.
 const startMusicOnce = () => {
-  startMusicPlaylist();
+  const start = () => startMusicPlaylist();
+  if (window.__introDone === false) window.addEventListener('introdone', start, { once: true });
+  else start();
   window.removeEventListener('pointerdown', startMusicOnce);
   window.removeEventListener('keydown', startMusicOnce);
 };
@@ -122,6 +126,8 @@ const boostBlur = new ShaderPass({
   `,
 });
 composer.addPass(boostBlur);
+const smaa = new SMAAPass(window.innerWidth * renderer.getPixelRatio(), window.innerHeight * renderer.getPixelRatio());
+composer.addPass(smaa);
 composer.addPass(new OutputPass());
 
 // ---- lights ----
@@ -167,11 +173,27 @@ shadowCatcher.position.y = 0.012;
 shadowCatcher.receiveShadow = true;
 scene.add(shadowCatcher);
 
-// Glowing energon grid. Bright cyan so it crosses the bloom threshold.
-const grid = new THREE.GridHelper(FLOOR_SIZE, 100, 0x9fffff, 0x2f8394);
-grid.material.transparent = true;
-grid.material.opacity = 0.72;
-grid.position.y = 0.025;
+// Glowing energon grid. Mesh strips give the lines a little readable thickness.
+const grid = new THREE.Group();
+{
+  const divisions = 100;
+  const step = FLOOR_SIZE / divisions;
+  const lineT = 0.08;
+  const minorMat = new THREE.MeshBasicMaterial({ color: 0x2f8394, transparent: true, opacity: 0.62 });
+  const majorMat = new THREE.MeshBasicMaterial({ color: 0x9fffff, transparent: true, opacity: 0.72 });
+  const lineX = new THREE.BoxGeometry(FLOOR_SIZE, 0.01, lineT);
+  const lineZ = new THREE.BoxGeometry(lineT, 0.01, FLOOR_SIZE);
+  for (let i = 0; i <= divisions; i += 1) {
+    const p = -FLOOR_HALF + i * step;
+    const mat = Math.abs(p) < 0.001 ? majorMat : minorMat;
+    const xLine = new THREE.Mesh(lineX, mat);
+    xLine.position.set(0, 0.025, p);
+    grid.add(xLine);
+    const zLine = new THREE.Mesh(lineZ, mat);
+    zLine.position.set(p, 0.025, 0);
+    grid.add(zLine);
+  }
+}
 scene.add(grid);
 
 // ---- arena walls (clamp the play area to the visible floor) ----
@@ -209,11 +231,13 @@ enemyManager.onKill = ({ reason, position }) => {
   }
   healthPackManager.maybeDrop(position);
 };
+enemyManager.onWaveStart = (wave) => showWaveBanner(wave);
 
-const beachBallManager = new BeachBallManager(scene, ARENA_HALF);
-const dominoManager = new DominoManager(scene);
-const legoPyramidManager = new LegoPyramidManager(scene, ARENA_HALF);
-const rubiksCubeManager = new RubiksCubeManager(scene);
+const physicsWorld = new PhysicsWorld(ARENA_HALF);
+const beachBallManager = new BeachBallManager(scene, ARENA_HALF, physicsWorld);
+const dominoManager = new DominoManager(scene, physicsWorld);
+const legoPyramidManager = new LegoPyramidManager(scene, ARENA_HALF, physicsWorld);
+const rubiksCubeManager = new RubiksCubeManager(scene, physicsWorld);
 
 // ---- game state ----
 const MAX_HP = 100;
@@ -226,6 +250,7 @@ let hitFlash = 0;              // red screen-edge flash, decays each frame
 let deathTimer = 0;
 let deathExploded = false;
 let gameState = 'loading';    // 'loading' | 'playing' | 'paused' | 'dying' | 'gameover'
+let pendingInitialWave = false;
 
 function addCameraShake(strength, duration) {
   shakeStrength = Math.max(shakeStrength, strength);
@@ -260,35 +285,67 @@ function restart() {
   beachBallManager.reset();
   dominoManager.reset();
   legoPyramidManager.reset();
+  rubiksCubeManager.reset();
   hideGameOver();
   hidePause();
   setMusicPaused(false);
   gameState = 'playing';
+  showWaveBanner(1);
+}
+
+function beginInitialWave() {
+  if (!pendingInitialWave) return;
+  pendingInitialWave = false;
+  enemyManager.reset(); // queue wave 1
+  gameState = 'playing';
+  showWaveBanner(1);
 }
 
 // ---- load Optimus, then build the player ----
 let player = null;
 
-const loader = new GLTFLoader();
-loader.load(
-  '/models/optimus/OptimusPrime_G1.glb',
-  (gltf) => {
+async function bootGame() {
+  try {
+    overlay.textContent = 'preloading audio...';
+    await transformSfxReady;
+
+    overlay.textContent = 'preloading assets...';
+    const loadingManager = new THREE.LoadingManager();
+    loadingManager.onProgress = (_url, loaded, total) => {
+      overlay.textContent = `preloading assets... ${Math.round((loaded / Math.max(total, 1)) * 100)}%`;
+    };
+
+    const loader = new GLTFLoader(loadingManager);
+    const texLoader = new THREE.TextureLoader(loadingManager);
+    texLoader.setPath('/models/optimus/textures/');
+
+    const gltf = await loader.loadAsync('/models/optimus/OptimusPrime_G1.glb');
     const obj = gltf.scene;
 
-    const texLoader = new THREE.TextureLoader();
-    texLoader.setPath('/models/optimus/textures/');
-    const tex = (file, srgb) => {
-      const t = texLoader.load(file);
+    const tex = async (file, srgb) => {
+      const t = await texLoader.loadAsync(file);
       t.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
       t.flipY = false; // match glTF UV convention (opposite of FBX)
       t.anisotropy = 8;
       return t;
     };
     const TEX = {
-      body:   { map: 'M_OptimusPrime_G1_baseColor2.png',       normal: 'Tx_OptimusPrime_G1_N.png' },
-      rifle:  { map: 'M_OptimusPrime_G1_Rifle_baseColor2.png', normal: 'Tx_OptimusPrime_Rifle_N.png' },
-      axe:    { map: 'M_OptimusPrime_G1_Axe_baseColor2.png',   normal: 'Tx_OptimusPrime_Axe_N.png' },
-      matrix: { map: 'M_Matrix_OP_baseColor2.png',             normal: 'Tx_Matrix_N.png' },
+      body: {
+        map: await tex('M_OptimusPrime_G1_baseColor2.png', true),
+        normal: await tex('Tx_OptimusPrime_G1_N.png', false),
+      },
+      rifle: {
+        map: await tex('M_OptimusPrime_G1_Rifle_baseColor2.png', true),
+        normal: await tex('Tx_OptimusPrime_Rifle_N.png', false),
+      },
+      axe: {
+        map: await tex('M_OptimusPrime_G1_Axe_baseColor2.png', true),
+        normal: await tex('Tx_OptimusPrime_Axe_N.png', false),
+      },
+      matrix: {
+        map: await tex('M_Matrix_OP_baseColor2.png', true),
+        normal: await tex('Tx_Matrix_N.png', false),
+      },
     };
     const kindOf = (name) =>
       /rifle/i.test(name) ? 'rifle' : /axe/i.test(name) ? 'axe' : /matrix/i.test(name) ? 'matrix' : 'body';
@@ -311,8 +368,8 @@ loader.load(
 
       const t = TEX[kindOf(c.name)];
       const mat = new THREE.MeshStandardMaterial({
-        map: tex(t.map, true),
-        normalMap: tex(t.normal, false),
+        map: t.map,
+        normalMap: t.normal,
         metalness: 0.85,
         roughness: 0.5,
         envMapIntensity: 1.2,
@@ -342,8 +399,9 @@ loader.load(
       const ballHits = beachBallManager.handleAttack(type, player.object.position, player.heading);
       const dominoHits = dominoManager.handleAttack(type, player.object.position, player.heading);
       const legoHits = legoPyramidManager.handleAttack(type, player.object.position, player.heading);
+      const rubiksHits = rubiksCubeManager.handleAttack(type, player.object.position, player.heading);
       const killed = enemyManager.handleAttack(type, player.object.position, player.heading);
-      if (killed > 0 || ballHits > 0 || dominoHits > 0 || legoHits > 0) {
+      if (killed > 0 || ballHits > 0 || dominoHits > 0 || legoHits > 0 || rubiksHits > 0) {
         addCameraShake(type === 'smash' ? 1.05 : 0.45, type === 'smash' ? 0.22 : 0.1);
         playCombatSfx(type === 'smash' ? 'smash' : 'hit');
       } else {
@@ -353,12 +411,15 @@ loader.load(
     window.__player = player; window.__scene = scene;
 
     initHud();
-    enemyManager.reset(); // queue wave 1
-    gameState = 'playing';
-  },
-  (e) => { overlay.textContent = `loading... ${((e.loaded / (e.total || 1)) * 100).toFixed(0)}%`; },
-  (err) => { overlay.textContent = 'GLB load error (see console)'; console.error(err); }
-);
+    pendingInitialWave = true;
+    if (window.__introDone === false) window.addEventListener('introdone', beginInitialWave, { once: true });
+    else beginInitialWave();
+  } catch (err) {
+    overlay.textContent = 'preload error (see console)';
+    console.error(err);
+  }
+}
+bootGame();
 
 // ---- resize ----
 window.addEventListener('resize', () => {
@@ -369,6 +430,7 @@ window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
   composer.setSize(window.innerWidth, window.innerHeight);
   bloom.setSize(window.innerWidth, window.innerHeight);
+  smaa.setSize(window.innerWidth * renderer.getPixelRatio(), window.innerHeight * renderer.getPixelRatio());
 });
 
 // ---- main loop ----
@@ -397,7 +459,11 @@ function animate() {
       iframe = Math.max(0, iframe - dt);
       hitFlash = Math.max(0, hitFlash - dt * 3);
 
-      if (input.wasPressed('Space')) player.toggleTransform();
+      if (input.wasPressed('Space')) {
+        const wasTransforming = player.transforming;
+        player.toggleTransform();
+        if (!wasTransforming && player.transforming) addCameraShake(0.35, 0.12);
+      }
       if (input.wasPressed('MouseLeft')) {
         if (player.mode === MODE.VEHICLE) player.tryBoost();
         else player.attack('attack01');
@@ -409,9 +475,15 @@ function animate() {
       player.object.position.x = Math.max(-lim, Math.min(lim, player.object.position.x));
       player.object.position.z = Math.max(-lim, Math.min(lim, player.object.position.z));
 
-      beachBallManager.update(dt, player, enemyManager);
+      beachBallManager.update(dt, player);
       dominoManager.update(dt, player, beachBallManager.getImpactors());
       legoPyramidManager.update(dt, player, beachBallManager.getImpactors());
+      rubiksCubeManager.update(dt, player, beachBallManager.getImpactors());
+      physicsWorld.step(dt);
+      beachBallManager.sync(enemyManager);
+      dominoManager.sync();
+      legoPyramidManager.sync();
+      rubiksCubeManager.sync();
       enemyManager.update(dt, player, damagePlayer, [
         ...beachBallManager.getObstacles(),
         ...dominoManager.getObstacles(),
@@ -421,6 +493,7 @@ function animate() {
       healthPackManager.update(dt, player, (amount) => {
         if (health >= MAX_HP) return false;
         health = Math.min(MAX_HP, health + amount);
+        playCombatSfx('upgrade');
         return true;
       });
     } else if (gameState === 'paused') {
@@ -503,6 +576,8 @@ function animate() {
       boosting: player.boosting, boostReady: player.boostReady, boostCooldownRatio: player.boostCooldownRatio,
       wave: enemyManager.wave, kills: enemyManager.kills, enemies: enemyManager.alive,
       waveBreak: enemyManager.waveBreak, hitFlash,
+      playerPos: player.object.position,
+      enemyPositions: enemyManager.getRadarTargets(),
     });
   }
 

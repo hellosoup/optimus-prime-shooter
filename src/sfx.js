@@ -247,6 +247,10 @@ export function playCombatSfx(kind = 'hit') {
 
   if (kind === 'whiff') {
     addTone(c, out, now, { type: 'triangle', from: 360, to: 190, duration: 0.08, volume: 0.12 });
+  } else if (kind === 'upgrade') {
+    addTone(c, out, now, { type: 'triangle', from: 420, to: 840, duration: 0.12, volume: 0.18 });
+    addTone(c, out, now + 0.08, { type: 'sine', from: 640, to: 1280, duration: 0.16, volume: 0.16 });
+    addTone(c, out, now + 0.18, { type: 'triangle', from: 980, to: 1560, duration: 0.18, volume: 0.12 });
   } else if (kind === 'enemyDeath') {
     addTone(c, out, now, { type: 'sawtooth', from: 150, to: 34, duration: 0.28, volume: 0.38 });
     addTone(c, out, now + 0.015, { type: 'square', from: 520, to: 110, duration: 0.16, volume: 0.16 });

@@ -39,6 +39,29 @@
       .hud-controls > div:not(.hud-row) { display: flex; justify-content: space-between; gap: 10px; }
       .hud-controls b { color: #ffffff; font-weight: 800; }
       .hud-controls span { opacity: .78; text-align: right; }
+      #radar {
+        position: fixed; right: 12px; bottom: 12px; z-index: 10;
+        width: 128px; height: 128px; border-radius: 50%;
+        background:
+          radial-gradient(circle at center, rgba(127,233,255,.1), rgba(5,8,15,.7) 62%, rgba(3,5,10,.92)),
+          rgba(5,8,15,.72);
+        border: 1px solid rgba(127,233,255,.42);
+        box-shadow: 0 0 18px rgba(0,200,255,.22), inset 0 0 18px rgba(0,200,255,.12);
+        overflow: hidden; pointer-events: none;
+      }
+      #radar canvas { width: 100%; height: 100%; display: block; }
+      #wave-banner {
+        position: fixed; top: 28px; left: 50%; transform: translateX(-50%) translateY(-18px);
+        z-index: 12; pointer-events: none; opacity: 0;
+        font: 900 20px/1 ui-monospace, monospace; letter-spacing: .18em;
+        color: #eaffff; text-shadow: 0 0 10px rgba(0,200,255,.85), 0 0 28px rgba(0,200,255,.45);
+        padding: 7px 14px; border-top: 1px solid rgba(127,233,255,.55); border-bottom: 1px solid rgba(127,233,255,.55);
+        background: linear-gradient(90deg, transparent, rgba(5,8,15,.72), transparent);
+        transition: opacity .25s ease-out, transform .25s ease-out;
+      }
+      #wave-banner.show {
+        opacity: 1; transform: translateX(-50%) translateY(0);
+      }
       #hitflash {
         position: fixed; inset: 0; pointer-events: none; z-index: 20; opacity: 0;
         background: radial-gradient(ellipse at center, rgba(255,0,0,0) 45%, rgba(255,30,40,.6) 100%);
@@ -56,11 +79,89 @@
       #gameover .go-sub { margin-top: 12px; color: #9fe9ff; text-shadow: 0 0 8px rgba(0,200,255,.6); }
       #gameover .go-hint, #pausemenu .pause-hint { margin-top: 20px; opacity: .7; color: #cfe9ff; }
       #pausemenu .pause-options { margin-top: 16px; display: grid; gap: 8px; color: #eaffff; }
+      #intro {
+        position: fixed; inset: 0; z-index: 100; overflow: hidden; cursor: pointer;
+        background: transparent;
+      }
+      #intro.done { display: none; }
+      .intro-panel {
+        position: absolute; left: 0; right: 0; height: 50.5%;
+        background: #050507;
+        transition: transform 1.4s cubic-bezier(.76,0,.24,1);
+      }
+      .intro-panel.top { top: 0; }
+      .intro-panel.bottom { bottom: 0; }
+      #intro.split .intro-panel.top { transform: translateY(-101%); }
+      #intro.split .intro-panel.bottom { transform: translateY(101%); }
+      .intro-edge {
+        position: absolute; left: 0; right: 0; height: 2px; opacity: 0;
+        background: linear-gradient(90deg, transparent, rgba(56,189,248,.9) 20%, #dff8ff 50%, rgba(56,189,248,.9) 80%, transparent);
+        box-shadow: 0 0 12px 2px rgba(56,189,248,.7), 0 0 40px 6px rgba(56,189,248,.35);
+      }
+      .intro-panel.top .intro-edge { bottom: 0; }
+      .intro-panel.bottom .intro-edge { top: 0; }
+      #intro.split .intro-edge { opacity: 1; transition: opacity .3s ease-out; }
+      .intro-stage {
+        position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+        transition: opacity .45s ease-out;
+      }
+      #intro.split .intro-stage { opacity: 0; }
+      .intro-stage::before {
+        content: ""; position: absolute; inset: 0;
+        background-image: linear-gradient(rgba(56,189,248,.055) 1px, transparent 1px), linear-gradient(90deg, rgba(56,189,248,.055) 1px, transparent 1px);
+        background-size: 64px 64px;
+        mask-image: radial-gradient(ellipse 70% 60% at 50% 50%, black, transparent);
+        animation: intro-grid-fade 1.2s ease-out both;
+      }
+      .intro-stage::after {
+        content: ""; position: absolute; left: 0; right: 0; top: -2%; height: 1px;
+        background: linear-gradient(90deg, transparent, rgba(56,189,248,.65), transparent);
+        box-shadow: 0 0 8px 1px rgba(56,189,248,.45);
+        animation: intro-scan 3.2s ease-in-out infinite;
+      }
+      .intro-autobot {
+        width: min(32vw, 190px); aspect-ratio: 1; position: relative; z-index: 1;
+        filter: drop-shadow(0 0 20px rgba(239,68,68,.72)) drop-shadow(0 0 46px rgba(239,68,68,.35));
+        animation: intro-emblem-in 1.6s ease-out .25s both, intro-emblem-pulse 2.4s ease-in-out 1.8s infinite;
+      }
+      .intro-autobot img { width: 100%; height: 100%; display: block; object-fit: contain; mix-blend-mode: screen; }
+      @keyframes intro-scan {
+        0% { top: -2%; opacity: 0; }
+        15%, 85% { opacity: 1; }
+        100% { top: 102%; opacity: 0; }
+      }
+      @keyframes intro-grid-fade {
+        from { opacity: 0; }
+        to { opacity: 1; }
+      }
+      @keyframes intro-emblem-in {
+        from { opacity: 0; transform: scale(.82); filter: brightness(0); }
+        60% { filter: brightness(.75); }
+        to { opacity: 1; transform: scale(1); filter: brightness(1); }
+      }
+      @keyframes intro-emblem-pulse {
+        0%, 100% { opacity: 1; transform: scale(1); }
+        50% { opacity: .82; transform: scale(.985); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #intro { display: none; }
+      }
     </style>
   </head>
   <body>
+    <div id="intro" aria-hidden="true">
+      <div class="intro-panel top"><div class="intro-edge"></div></div>
+      <div class="intro-panel bottom"><div class="intro-edge"></div></div>
+      <div class="intro-stage">
+        <div class="intro-autobot">
+          <img src="/characters/sigil-autobot.png" alt="" />
+        </div>
+      </div>
+    </div>
     <div id="app"></div>
     <div id="overlay">loading...</div>
+    <div id="wave-banner"></div>
+    <div id="radar"><canvas id="radar-canvas" width="128" height="128"></canvas></div>
     <div id="hitflash"></div>
     <div id="gameover">
       <div class="go-title">GAME OVER</div>
@@ -75,6 +176,47 @@
       </div>
       <div class="pause-hint">Gameplay is frozen</div>
     </div>
+    <script>
+      (() => {
+        const intro = document.getElementById('intro');
+        if (!intro) return;
+        window.__introDone = false;
+        const audio = new Audio('/sfx/G1-Scene-Transition-Effect.ogg');
+        audio.volume = 0.75;
+        audio.preload = 'auto';
+        let introSfxPlayed = false;
+        let introFinished = false;
+        const playIntroSfx = () => {
+          if (introSfxPlayed) return;
+          audio.play()
+            .then(() => { introSfxPlayed = true; })
+            .catch(() => {});
+        };
+        const unlockIntroSfx = () => playIntroSfx();
+        window.addEventListener('pointerdown', unlockIntroSfx, { once: true, capture: true });
+        window.addEventListener('keydown', unlockIntroSfx, { once: true, capture: true });
+        const finish = (musicDelay = 0) => {
+          if (introFinished) return;
+          introFinished = true;
+          intro.classList.add('done');
+          window.setTimeout(() => {
+            window.__introDone = true;
+            window.dispatchEvent(new Event('introdone'));
+          }, musicDelay);
+        };
+        const split = window.setTimeout(() => intro.classList.add('split'), 3400);
+        const done = window.setTimeout(() => finish(0), 4900);
+        const skip = () => {
+          window.clearTimeout(split);
+          window.clearTimeout(done);
+          finish(1200);
+        };
+        audio.load();
+        playIntroSfx();
+        window.addEventListener('pointerdown', skip, { once: true });
+        window.addEventListener('keydown', skip, { once: true });
+      })();
+    </script>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

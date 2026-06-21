@@ -12,8 +12,10 @@ const SPAWN_RADIUS = 48;          // off-screen ring distance from the player
 const RAM_KILL_SPEED = 24;        // truck speed above which contact destroys enemies
 const CONTACT_DAMAGE = 12;        // damage an enemy deals to Optimus on touch
 const SPAWN_INTERVAL = 0.35;      // stagger between spawns within a wave
+const FIRST_WAVE_DELAY = 2.0;     // let the opening wave banner breathe
 const WAVE_BREAK = 3.0;           // seconds between clearing a wave and the next
 const ENEMY_KNOCKBACK_DRAG = 8.5;
+const ENEMY_SEPARATION = ENEMY_RADIUS * 2.1;
 
 const ATTACK01_RANGE = 8;         // left-click: short forward hit
 const ATTACK01_DOT = Math.cos(THREE.MathUtils.degToRad(70)); // forward cone half-angle
@@ -91,6 +93,7 @@ export class EnemyManager {
 
     this.effects = [];
     this.onKill = null; // ({ position, reason }) => {}
+    this.onWaveStart = null; // (waveNumber) => {}
     this.wave = 0;
     this.kills = 0;
     this.spawnQueue = 0;
@@ -119,11 +122,16 @@ export class EnemyManager {
     this.wave = n;
     this.spawnQueue = 4 + n * 3;                  // count grows each wave
     this.enemySpeed = Math.min(6 + n * 1.1, 26);  // speed grows, capped
-    this.spawnTimer = 0;
+    this.spawnTimer = n === 1 ? FIRST_WAVE_DELAY : 0;
     this.waveBreak = 0;
+    if (this.onWaveStart) this.onWaveStart(n);
   }
 
   get alive() { return this.enemies.length; }
+
+  getRadarTargets() {
+    return this.enemies.map((e) => e.mesh.position);
+  }
 
   _createRobot() {
     const bot = new THREE.Group();
@@ -427,6 +435,21 @@ export class EnemyManager {
         parts.rightLeg.rotation.x = gait * 0.55;
         e.mesh.position.y = Math.abs(Math.sin(e.step * 2)) * 0.08;
       }
+      for (let j = i - 1; j >= 0; j -= 1) {
+        const other = this.enemies[j];
+        const ox = e.mesh.position.x - other.mesh.position.x;
+        const oz = e.mesh.position.z - other.mesh.position.z;
+        const dist = Math.hypot(ox, oz);
+        if (dist <= 0.001 || dist >= ENEMY_SEPARATION) continue;
+        const push = (ENEMY_SEPARATION - dist) * 0.5;
+        const nx = ox / dist;
+        const nz = oz / dist;
+        e.mesh.position.x += nx * push;
+        e.mesh.position.z += nz * push;
+        other.mesh.position.x -= nx * push;
+        other.mesh.position.z -= nz * push;
+      }
+
       e.hitCD = Math.max(0, e.hitCD - dt);
 
       if (d < contactDist) {
